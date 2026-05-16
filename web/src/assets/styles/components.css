@@ -385,9 +385,13 @@
 .c-banner svg { width: 14px; height: 14px; }
 
 /* ============== ENTITY STYLES ============== */
-.ent { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-.ent.outer { stroke: var(--cy); stroke-width: 2.0; filter: drop-shadow(0 0 3px rgba(77,207,224,0.3)); }
-.ent.hole  { stroke: var(--cy); stroke-width: 1.5; }
+/* `.ent` default — visible neutral stroke so unclassified ("other")
+ *  entities (e.g. the part body when outer detection misses) still appear
+ *  on the dark canvas. Subcategories below override colour/weight. */
+.ent { fill: none; stroke: var(--t-2); stroke-width: 1.1; opacity: 0.8;
+       stroke-linecap: round; stroke-linejoin: round; }
+.ent.outer { stroke: var(--cy); stroke-width: 2.0; opacity: 1; filter: drop-shadow(0 0 3px rgba(77,207,224,0.3)); }
+.ent.hole  { stroke: var(--cy); stroke-width: 1.5; opacity: 1; }
 .ent.dim, .ent.balloon, .ent.frame { stroke: var(--am); stroke-width: 0.9; opacity: 0.85; }
 .ent.tap { stroke: var(--am); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.85; }
 .ent.balloon-circle { fill: rgba(245,166,35,0.06); stroke: var(--am); stroke-width: 0.9; }
