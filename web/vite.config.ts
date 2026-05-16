@@ -12,6 +12,9 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     strictPort: true,
+    // Tailscale Funnel / Cloudflare Tunnel など任意ホストからの
+    // dev server アクセスを許可 (本番では nginx 等で配信する想定)。
+    allowedHosts: true,
     hmr: {
       host: 'localhost',
       port: 5173,
