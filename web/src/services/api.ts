@@ -13,11 +13,17 @@
  */
 
 import type {
+  ChamferGeometry,
+  ChamferSpec,
+  CleanupFrameResult,
+  CornerInfo,
   DeleteResult,
+  EdgeInfo,
   FileData,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
+  PdfExportOptions,
   Session,
 } from '../types/dxf';
 import {
@@ -28,6 +34,11 @@ import {
   mockDetectOuter,
   mockConfirmOuterManual,
   mockComputeOffset,
+  mockGetCorners,
+  mockSetChamfer,
+  mockGetChamfer,
+  mockCleanupFrame,
+  mockExportPdf,
 } from './mockSession';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? 'http://localhost:8080').replace(/\/$/, '');
@@ -285,6 +296,91 @@ export async function getOffset(
   }
   const raw = (await res.json()) as { result?: OffsetResult };
   return raw.result ?? null;
+}
+
+/* -------------------- Phase 3: chamfer / PDF / cleanup-frame -------------- */
+
+/** GET .../corners — outer-loop corners + edges (C1..Cn / E1..En). The
+ *  backend always returns both arrays so the chamfer UI can populate the
+ *  「角」and「辺」sections in one fetch. */
+export async function getCorners(
+  sid: string,
+  fid: string,
+): Promise<{ corners: CornerInfo[]; edges: EdgeInfo[] }> {
+  if (!(await probeBackend())) return mockGetCorners(sid, fid);
+  const res = await fetch(`${API_BASE}/api/session/${sid}/file/${fid}/corners`);
+  const data = await jsonOrThrow<{ corners: CornerInfo[]; edges: EdgeInfo[] }>(res);
+  return { corners: data.corners ?? [], edges: data.edges ?? [] };
+}
+
+/** POST .../chamfer — replace the chamfer spec list and get geometry back. */
+export async function setChamfer(
+  sid: string,
+  fid: string,
+  specs: ChamferSpec[],
+): Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry }> {
+  if (!(await probeBackend())) return mockSetChamfer(sid, fid, specs);
+  const res = await fetch(
+    `${API_BASE}/api/session/${sid}/file/${fid}/chamfer`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ specs }),
+    },
+  );
+  return jsonOrThrow<{ specs: ChamferSpec[]; geometry: ChamferGeometry }>(res);
+}
+
+/** GET .../chamfer — rehydrate the persisted chamfer spec + geometry. */
+export async function getChamfer(
+  sid: string,
+  fid: string,
+): Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry } | null> {
+  if (!(await probeBackend())) return mockGetChamfer(sid, fid);
+  const res = await fetch(`${API_BASE}/api/session/${sid}/file/${fid}/chamfer`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, body, buildErrorMessage(res.status, body, res.statusText));
+  }
+  return res.json() as Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry }>;
+}
+
+/** POST .../cleanup-frame — reserve the production-frame entities for deletion. */
+export async function cleanupFrame(
+  sid: string,
+  fid: string,
+): Promise<CleanupFrameResult> {
+  if (!(await probeBackend())) return mockCleanupFrame(sid, fid);
+  const res = await fetch(
+    `${API_BASE}/api/session/${sid}/file/${fid}/cleanup-frame`,
+    { method: 'POST' },
+  );
+  return jsonOrThrow<CleanupFrameResult>(res);
+}
+
+/** GET .../export?format=pdf — material-take PDF download (binary).
+ *  ``opts.material`` (H4) is forwarded as a query param so the backend can
+ *  render it in the PDF header band. */
+export async function exportPdf(
+  sid: string,
+  fid: string,
+  opts: PdfExportOptions,
+): Promise<Blob> {
+  if (!(await probeBackend())) return mockExportPdf(sid, fid, opts);
+  const params = new URLSearchParams({ format: 'pdf' });
+  params.set('with_offset', opts.with_offset ? 'true' : 'false');
+  params.set('with_chamfer', opts.with_chamfer ? 'true' : 'false');
+  params.set('with_frame', opts.frame);
+  if (opts.material) params.set('material', opts.material);
+  const res = await fetch(
+    `${API_BASE}/api/session/${sid}/file/${fid}/export?${params.toString()}`,
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, body, buildErrorMessage(res.status, body, res.statusText));
+  }
+  return res.blob();
 }
 
 export { ApiError };

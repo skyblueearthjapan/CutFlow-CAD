@@ -169,6 +169,78 @@ export interface OffsetResult {
   warnings: string[];
 }
 
+/* -------------------- Phase 3: chamfer / PDF / frame cleanup -------------- */
+
+/** Chamfer spec sent to the backend per corner. */
+export interface ChamferSpec {
+  corner_id: string;
+  size_mm: number;
+  angle_deg: number;
+  type: 'C' | 'bevel';
+}
+
+/** Outer-loop corner returned by GET /corners (mirrors backend `CornerInfo`). */
+export interface CornerInfo {
+  corner_id: string;
+  /** [x, y] in DXF coordinates (Y-up). */
+  position: [number, number];
+  /** Interior angle (degrees) at the corner. */
+  angle_deg: number;
+  /** Acute (< 90°). */
+  is_acute: boolean;
+  /** 凸 (convex, outward) when true; 凹 (concave) when false. */
+  is_convex: boolean;
+}
+
+/** Outer-loop edge returned by GET /corners (mirrors backend `EdgeInfo`).
+ *  Used for 開先 (bevel) UI targets — the operator picks an edge to mark up. */
+export interface EdgeInfo {
+  edge_id: string;
+  /** [x, y] of the edge midpoint in DXF coordinates. */
+  midpoint: [number, number];
+  /** Edge length in mm. */
+  length: number;
+}
+
+/** Per-corner / per-edge annotation returned by POST /chamfer.
+ *  ``kind='C'`` ⇒ C面 (corner marker); ``kind='bevel'`` ⇒ 開先 (edge mid label). */
+export interface ChamferAnnotation {
+  /** Corner or edge id this annotation references (``C1``..``Cn`` / ``E1``..``En``). */
+  corner_id: string;
+  /** [x, y] anchor in DXF coordinates — for ``C`` this is the corner, for
+   *  ``bevel`` this is the edge midpoint. */
+  position: [number, number];
+  /** Human label, e.g. ``"C2"`` or ``"開先 30°"``. */
+  label: string;
+  /** Discriminator matching :class:`ChamferSpec.type`. */
+  kind: 'C' | 'bevel';
+}
+
+export interface ChamferGeometry {
+  items: ChamferAnnotation[];
+}
+
+/** Frame option for PDF export.
+ *   - 'auto':    keep the production frame if one was detected
+ *   - 'none':    no frame (current default, paper-print clean output)
+ *   - 'cutflow': overlay the CutFlow material-take frame
+ */
+export type PdfFrameOption = 'auto' | 'none' | 'cutflow';
+
+export interface PdfExportOptions {
+  frame: PdfFrameOption;
+  with_offset: boolean;
+  with_chamfer: boolean;
+  /** Optional material text rendered on the PDF header band (H4). */
+  material?: string;
+}
+
+/** Result of POST /cleanup-frame. */
+export interface CleanupFrameResult {
+  removed_count: number;
+  frame_entity_ids: string[];
+}
+
 /**
  * UI-side grouping for the delete inspector. The 4 categories the v3 mockup
  * surfaces are dim / balloon / tap / frame; "other" stays hidden.

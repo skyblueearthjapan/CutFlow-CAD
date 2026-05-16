@@ -34,6 +34,13 @@ const {
   manualMode,
   manualSelection,
   addToManual,
+  // Phase 3
+  corners,
+  chamferGeometry,
+  chamferSpecByCorner,
+  chamferDefaultSize,
+  setChamferSpec,
+  removeChamferSpec,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -108,11 +115,39 @@ const bannerText = computed(() =>
 );
 const bannerTitle = computed(() => (lastError.value ? 'エラー' : '注意'));
 
-/** Canvas-level click handler — propagates entity hits to the store.
+/** Canvas-level click handler — propagates entity / corner hits to the store.
  *  - delete mode: toggles the entity in/out of the delete selection.
  *  - outer mode + manual chain mode: appends the entity to the manual chain
- *    (clicking the most-recent entity again pops it for one-step undo). */
+ *    (clicking the most-recent entity again pops it for one-step undo).
+ *  - chamfer mode: a corner marker carries `data-corner-id` — clicking it
+ *    toggles the spec via the current default size/angle. Corner clicks
+ *    take precedence over entity clicks so users don't accidentally select
+ *    underlying lines. */
 function onCanvasClick(e: MouseEvent) {
+  // Chamfer mode: handle corner-id hits first (the marker sits on top of
+  // entities so the user's click intent is to toggle the corner).
+  if (activeTool.value === 'chamfer') {
+    let el: SVGElement | null = e.target as SVGElement;
+    while (el && el instanceof SVGElement) {
+      const cid = el.getAttribute('data-corner-id');
+      if (cid) {
+        if (chamferSpecByCorner.value.has(cid)) {
+          removeChamferSpec(cid);
+        } else {
+          // H6: canvas corner click is C面 only — angle is fixed 45°.
+          setChamferSpec({
+            corner_id: cid,
+            size_mm: chamferDefaultSize.value,
+            angle_deg: 45,
+            type: 'C',
+          });
+        }
+        return;
+      }
+      el = el.parentNode as SVGElement | null;
+    }
+    return;
+  }
   if (activeTool.value !== 'delete' && !(activeTool.value === 'outer' && manualMode.value)) {
     return;
   }
@@ -162,6 +197,33 @@ const offsetPreviewPath = computed<string>(() => {
 const showOffsetPreview = computed(
   () => activeTool.value === 'offset' && !!offsetPreviewPath.value,
 );
+
+/* -------------------- Phase 3 — chamfer markers / glyphs ----------------- */
+
+/** Show the chamfer markers only in chamfer mode (avoids purple dots leaking
+ *  into other tools' canvases). */
+const showChamfer = computed(
+  () => activeTool.value === 'chamfer' && corners.value.length > 0,
+);
+
+/** Marker radius scaled to the file's bounding box so the corner chip stays
+ *  visible regardless of part size. Min/max clamp keeps it sensible. */
+const cornerMarkerRadius = computed<number>(() => {
+  const f = currentFile.value;
+  if (!f) return 6;
+  const bb = f.bounding_box;
+  const span = Math.max(bb.max_x - bb.min_x, bb.max_y - bb.min_y, 1);
+  return Math.max(4, Math.min(span * 0.012, 12));
+});
+
+/** Glyph font-size, scaled with the file. */
+const chamferGlyphSize = computed<number>(() => {
+  const f = currentFile.value;
+  if (!f) return 10;
+  const bb = f.bounding_box;
+  const span = Math.max(bb.max_x - bb.min_x, bb.max_y - bb.min_y, 1);
+  return Math.max(8, Math.min(span * 0.018, 14));
+});
 
 /** "Fit" button — for now just resets to the bounding-box viewBox (no zoom
  *  state to clear yet). Kept as a stub so the button is wired and visible. */
@@ -227,6 +289,56 @@ function onFit() {
           <template v-if="showOffsetPreview">
             <path class="offset-fill" :d="offsetPreviewPath" />
             <path class="ent offset" :d="offsetPreviewPath" />
+          </template>
+
+          <!-- Chamfer annotation glyphs from the backend `chamfer/geometry`.
+               Backend shape (H2): `{ corner_id, position, label, kind }`.
+               C面 (kind='C')   → small purple dot + label next to the corner.
+               開先 (kind='bevel') → label only, anchored at the edge midpoint.
+               Only drawn in chamfer mode so it doesn't litter other tools. -->
+          <template v-if="showChamfer && chamferGeometry && chamferGeometry.items.length > 0">
+            <g
+              v-for="ann in chamferGeometry.items"
+              :key="ann.corner_id + ':ann'"
+              class="chamfer-annotation"
+              :class="ann.kind === 'bevel' ? 'bevel' : 'c-face'"
+            >
+              <circle
+                v-if="ann.kind === 'C'"
+                :cx="ann.position[0]"
+                :cy="ann.position[1]"
+                :r="cornerMarkerRadius * 0.45"
+              />
+              <g :transform="`scale(1, -1) translate(0, ${-2 * ann.position[1]})`">
+                <text
+                  class="chamfer-glyph-label"
+                  :x="ann.position[0] + cornerMarkerRadius + 4"
+                  :y="ann.position[1] + 4"
+                  :font-size="chamferGlyphSize"
+                >{{ ann.label }}</text>
+              </g>
+            </g>
+          </template>
+
+          <!-- Corner markers (purple chips) for clickable 角 targets. Only
+               rendered in chamfer mode (showChamfer) so the dots don't litter
+               other tools. Each marker carries data-corner-id so the canvas
+               click handler can resolve it back to a corner. -->
+          <template v-if="showChamfer">
+            <g
+              v-for="c in corners"
+              :key="c.corner_id"
+              :data-corner-id="c.corner_id"
+              class="chamfer-marker"
+              :class="{ on: chamferSpecByCorner.has(c.corner_id) }"
+              style="cursor:pointer"
+            >
+              <circle
+                :cx="c.position[0]"
+                :cy="c.position[1]"
+                :r="cornerMarkerRadius"
+              />
+            </g>
           </template>
         </g>
       </template>
@@ -403,3 +515,41 @@ function onFit() {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* Phase 3 — chamfer corner marker. Purple ring on top of the outer loop,
+   filled when the corner has a spec. Matches the .corner-chip palette so
+   the inspector and canvas read as one selection state. */
+:deep(.chamfer-marker) circle {
+  fill: rgba(167, 139, 250, 0.18);
+  stroke: var(--chamfer);
+  stroke-width: 1.4;
+  transition: fill .15s, stroke-width .15s;
+}
+:deep(.chamfer-marker:hover) circle {
+  fill: rgba(167, 139, 250, 0.32);
+  stroke-width: 2;
+}
+:deep(.chamfer-marker.on) circle {
+  fill: var(--chamfer);
+  stroke: var(--chamfer);
+  filter: drop-shadow(0 0 4px rgba(167, 139, 250, 0.6));
+}
+:deep(.chamfer-glyph-label) {
+  fill: var(--chamfer);
+  font-family: var(--f-mono);
+  stroke: none;
+  pointer-events: none;
+}
+/* H2 — backend-driven annotation glyph dots (C面: small purple dot beside
+   the corner; bevel: label-only anchored at the edge midpoint). The bevel
+   glyph reads as 注記-style, not as an interactive chip. */
+:deep(.chamfer-annotation) circle {
+  fill: var(--chamfer);
+  stroke: none;
+  pointer-events: none;
+}
+:deep(.chamfer-annotation.bevel) text {
+  font-style: italic;
+}
+</style>

@@ -21,7 +21,7 @@
 import { computed, ref, watch } from 'vue';
 import { useActiveTool, toolMeta } from '../stores/activeTool';
 import { useSession } from '../stores/session';
-import type { Entity } from '../types/dxf';
+import type { ChamferSpec, Entity } from '../types/dxf';
 
 const { activeTool } = useActiveTool();
 const {
@@ -54,19 +54,26 @@ const {
   setEdgeOverride,
   clearEdgeOverride,
   setCornerJoin,
+  // Phase 3
+  corners,
+  edges,
+  chamferSpecs,
+  chamferSpecByCorner,
+  chamferDefaultSize,
+  chamferDefaultAngle,
+  isApplyingChamfer,
+  isCleaningFrame,
+  lastFrameCleanup,
+  loadCorners,
+  setChamferSpec,
+  removeChamferSpec,
+  clearChamfer,
+  setChamferDefaultSize,
+  setChamferDefaultAngle,
+  cleanupFrame,
 } = useSession();
 
 const meta = computed(() => toolMeta[activeTool.value]);
-
-// chamfer tool: corner chip ON state (mockup initial: top-right only).
-// Kept as local state because chamfer is Phase 3 — UI-only for now.
-const selectedCorners = ref<Set<number>>(new Set([0]));
-function toggleCorner(i: number) {
-  const next = new Set(selectedCorners.value);
-  if (next.has(i)) next.delete(i);
-  else next.add(i);
-  selectedCorners.value = next;
-}
 
 /** Total number of entities that would be deleted on confirm. */
 const deleteCount = computed(() => selectedForDelete.value.size);
@@ -322,6 +329,90 @@ watch(
     }
   },
 );
+
+/* -------------------- Phase 3 — chamfer helpers ------------------------- */
+
+const CHAMFER_SIZE_STEP = 0.5;
+const CHAMFER_ANGLE_STEP = 5;
+
+/** Pill text in the tool head: count of specified corners. */
+const chamferPillText = computed(() => `${chamferSpecs.value.length} ヶ所`);
+
+/** Display label for a corner — falls back to its id if no localised name. */
+const CORNER_LABELS: Record<string, string> = {
+  C1: '右上',
+  C2: '左上',
+  C3: '左下',
+  C4: '右下',
+};
+function chamferCornerLabel(id: string): string {
+  return CORNER_LABELS[id] ?? id;
+}
+
+/** Apply the inspector's current default size + angle to the clicked target.
+ *  Clicking an already-specified target removes it (matches the v3 mockup
+ *  "クリックで解除" affordance). ``kind`` chooses C面 (corner) vs 開先 (edge).
+ *  H6: C面 angle is fixed to 45° by convention so we never thread the
+ *  bevel-default angle into a C-面 spec. */
+function toggleChamferTarget(targetId: string, kind: 'C' | 'bevel') {
+  if (chamferSpecByCorner.value.has(targetId)) {
+    removeChamferSpec(targetId);
+    return;
+  }
+  const spec: ChamferSpec =
+    kind === 'bevel'
+      ? {
+          corner_id: targetId,
+          // Bevel uses angle; size carries the (currently unused) leg length.
+          size_mm: chamferDefaultSize.value,
+          angle_deg: chamferDefaultAngle.value,
+          type: 'bevel',
+        }
+      : {
+          corner_id: targetId,
+          size_mm: chamferDefaultSize.value,
+          angle_deg: 45,
+          type: 'C',
+        };
+  setChamferSpec(spec);
+}
+
+function bumpChamferSize(delta: number) {
+  setChamferDefaultSize(chamferDefaultSize.value + delta);
+}
+function bumpChamferAngle(delta: number) {
+  setChamferDefaultAngle(chamferDefaultAngle.value + delta);
+}
+function onChamferSizeInput(e: Event) {
+  const v = (e.target as HTMLInputElement).value.replace(/^C/i, '');
+  const n = Number(v);
+  if (Number.isFinite(n)) setChamferDefaultSize(n);
+}
+function onChamferAngleInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setChamferDefaultAngle(n);
+}
+
+/** Auto-load the corner list when the user enters chamfer mode. The /corners
+ *  endpoint is cheap so we can do this without debounce. */
+watch(
+  () => activeTool.value,
+  (mode) => {
+    if (mode !== 'chamfer') return;
+    if (!currentFile.value) return;
+    loadCorners();
+  },
+);
+
+/** Re-load corners when the active file changes (in case the user was already
+ *  in chamfer mode and switched tabs). */
+watch(
+  () => currentFile.value?.file_id ?? null,
+  () => {
+    if (activeTool.value !== 'chamfer') return;
+    loadCorners();
+  },
+);
 </script>
 
 <template>
@@ -343,6 +434,8 @@ watch(
           ? outerPillText
           : activeTool === 'offset'
           ? offsetPillText
+          : activeTool === 'chamfer'
+          ? chamferPillText
           : meta.pill.text
       }}</span>
     </div>
@@ -507,6 +600,28 @@ watch(
               </div>
             </div>
           </template>
+
+          <!-- Phase 3: 製作図枠 auto-detect & cleanup -->
+          <div v-if="currentFile" class="action-row" style="margin-top:10px">
+            <button
+              class="action-btn"
+              :disabled="isCleaningFrame"
+              @click="cleanupFrame"
+            >
+              {{ isCleaningFrame ? '検出中…' : '製作図枠を自動検出して削除' }}
+            </button>
+          </div>
+          <div
+            v-if="lastFrameCleanup"
+            class="warn-strip"
+            style="margin-top:8px;background:rgba(52,211,153,0.06);color:var(--ok);border:1px solid rgba(52,211,153,0.25)"
+          >
+            <svg style="fill:var(--ok)"><use href="#i-warning" /></svg>
+            <div>
+              <b style="color:var(--ok)">{{ lastFrameCleanup.removed_count }} 件の製作図枠を削除予約</b><br />
+              書き出し時にDXFから除外されます。
+            </div>
+          </div>
         </div>
 
         <div class="summary">
@@ -659,7 +774,7 @@ watch(
         </div>
       </template>
 
-      <!-- ========== chamfer ========== -->
+      <!-- ========== chamfer (Phase 3 — wired to session store) ========== -->
       <template v-else-if="activeTool === 'chamfer'">
         <div class="section-block">
           <p class="lead">
@@ -669,30 +784,89 @@ watch(
           <div class="kv">
             <div><div class="k">C面サイズ</div><div class="ksub">CHAMFER-SIZE</div></div>
             <div class="num-step">
-              <button>−</button>
-              <input type="text" value="C2" />
+              <button :disabled="!currentFile" @click="bumpChamferSize(-CHAMFER_SIZE_STEP)">−</button>
+              <input
+                type="text"
+                :value="`C${chamferDefaultSize}`"
+                @change="onChamferSizeInput"
+              />
               <span class="unit">×45°</span>
-              <button>+</button>
+              <button :disabled="!currentFile" @click="bumpChamferSize(CHAMFER_SIZE_STEP)">+</button>
             </div>
           </div>
           <div class="kv">
             <div><div class="k">開先角度</div><div class="ksub">BEVEL-ANGLE</div></div>
             <div class="num-step">
-              <button>−</button>
-              <input type="text" value="30" />
+              <button :disabled="!currentFile" @click="bumpChamferAngle(-CHAMFER_ANGLE_STEP)">−</button>
+              <input
+                type="text"
+                :value="chamferDefaultAngle"
+                @change="onChamferAngleInput"
+              />
               <span class="unit">°</span>
-              <button>+</button>
+              <button :disabled="!currentFile" @click="bumpChamferAngle(CHAMFER_ANGLE_STEP)">+</button>
             </div>
           </div>
         </div>
 
         <div class="section-block">
-          <h6 class="lbl">指定済みの角 <span class="right">クリック で 解除</span></h6>
-          <div class="corner-list">
-            <div class="corner-chip" :class="{ on: selectedCorners.has(0) }" @click="toggleCorner(0)"><span class="dot"></span>右上 · C2</div>
-            <div class="corner-chip" :class="{ on: selectedCorners.has(1) }" @click="toggleCorner(1)"><span class="dot"></span>左上</div>
-            <div class="corner-chip" :class="{ on: selectedCorners.has(2) }" @click="toggleCorner(2)"><span class="dot"></span>右下</div>
-            <div class="corner-chip" :class="{ on: selectedCorners.has(3) }" @click="toggleCorner(3)"><span class="dot"></span>左下</div>
+          <h6 class="lbl">角 — C面 <span class="right">クリック で 解除</span></h6>
+          <div v-if="corners.length === 0" class="placeholder-card">
+            <div class="ic"><svg><use href="#i-chamfer" /></svg></div>
+            <h5>角が未取得です</h5>
+            <p>
+              外径を先に <b style="color:var(--t-2)">外形</b> モードで検出するか、ファイルをアップロードしてください。
+            </p>
+            <span class="meta">角 0 件</span>
+          </div>
+          <div v-else class="corner-list">
+            <div
+              v-for="c in corners"
+              :key="c.corner_id"
+              class="corner-chip"
+              :class="{ on: chamferSpecByCorner.has(c.corner_id) }"
+              @click="toggleChamferTarget(c.corner_id, 'C')"
+            >
+              <span class="dot" :class="c.is_convex ? '' : 'concave'"></span>
+              <template v-if="chamferSpecByCorner.get(c.corner_id)">
+                {{ chamferCornerLabel(c.corner_id) }}
+                ({{ c.is_convex ? '凸' : '凹' }}) ·
+                C{{ chamferSpecByCorner.get(c.corner_id)!.size_mm }}
+              </template>
+              <template v-else>
+                {{ chamferCornerLabel(c.corner_id) }} ({{ c.is_convex ? '凸' : '凹' }})
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- H3: 辺 (開先) section — pick an edge to add a bevel note. -->
+        <div v-if="edges.length > 0" class="section-block">
+          <h6 class="lbl">辺 — 開先 <span class="right">クリック で 解除</span></h6>
+          <div class="edge-list">
+            <div
+              v-for="e in edges"
+              :key="e.edge_id"
+              class="edge-row"
+              :class="{ on: chamferSpecByCorner.has(e.edge_id) }"
+              @click="toggleChamferTarget(e.edge_id, 'bevel')"
+              style="cursor:pointer"
+            >
+              <span class="ix">{{ e.edge_id }}</span>
+              <div>
+                <div class="nm">辺 {{ e.edge_id }}</div>
+                <div class="ns">{{ Math.round(e.length) }} mm</div>
+              </div>
+              <span
+                class="val"
+                :style="chamferSpecByCorner.has(e.edge_id) ? { color: 'var(--chamfer)' } : undefined"
+              >
+                <template v-if="chamferSpecByCorner.get(e.edge_id)">
+                  {{ chamferSpecByCorner.get(e.edge_id)!.angle_deg }}°
+                </template>
+                <template v-else>—</template>
+              </span>
+            </div>
           </div>
         </div>
 
@@ -701,13 +875,39 @@ watch(
           style="border-color:rgba(167,139,250,0.25);background:linear-gradient(180deg, rgba(167,139,250,0.04) 0%, rgba(167,139,250,0) 100%);"
         >
           <h6 style="color:var(--chamfer)">DXF出力時の注記</h6>
-          <div class="summary-row"><span class="k">右上 角部</span><span class="v" style="color:var(--chamfer)">C2 × 45°</span></div>
-          <div class="summary-row"><span class="k">開先 (該当辺)</span><span class="v">なし</span></div>
+          <template v-if="chamferSpecs.length === 0">
+            <div class="summary-row">
+              <span class="k">C面</span>
+              <span class="v">未指定</span>
+            </div>
+            <div class="summary-row"><span class="k">開先 (該当辺)</span><span class="v">なし</span></div>
+          </template>
+          <template v-else>
+            <div
+              v-for="s in chamferSpecs"
+              :key="s.corner_id"
+              class="summary-row"
+            >
+              <span class="k">
+                {{ s.type === 'bevel' ? `${s.corner_id} 辺` : `${chamferCornerLabel(s.corner_id)} 角部` }}
+              </span>
+              <span class="v" style="color:var(--chamfer)">
+                <template v-if="s.type === 'bevel'">開先 {{ s.angle_deg }}°</template>
+                <template v-else>C{{ s.size_mm }}</template>
+              </span>
+            </div>
+          </template>
         </div>
 
         <div class="action-row">
-          <button class="action-btn">指定をクリア</button>
-          <button class="action-btn cy"><svg><use href="#i-arrow-right" /></svg>出力へ</button>
+          <button
+            class="action-btn"
+            :disabled="chamferSpecs.length === 0 || isApplyingChamfer"
+            @click="clearChamfer"
+          >
+            {{ isApplyingChamfer ? '適用中…' : '指定をクリア' }}
+          </button>
+          <button class="action-btn cy" :disabled="!currentFile"><svg><use href="#i-arrow-right" /></svg>出力へ</button>
         </div>
       </template>
 

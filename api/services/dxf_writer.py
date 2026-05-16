@@ -6,6 +6,10 @@ This makes undo trivial (just clear the delete list).
 
 Phase 2 adds the optional ``extra_polylines`` parameter so an export can
 include the offset (加工代) loop as a new LWPOLYLINE on a dedicated layer.
+
+Phase 3 adds the optional ``chamfer_annotations`` parameter so chamfer /
+bevel notes (LEADER + MTEXT) ride along on the dedicated
+``CUTFLOW_CHAMFER`` layer.
 """
 
 from __future__ import annotations
@@ -23,12 +27,19 @@ log = logging.getLogger(__name__)
 _OFFSET_LAYER = "CUTFLOW_OFFSET"
 _OFFSET_COLOR = 4  # AutoCAD cyan — matches the on-screen "残す/構造" colour.
 
+# Phase 3 — chamfer / bevel annotations.
+_CHAMFER_LAYER = "CUTFLOW_CHAMFER"
+_CHAMFER_COLOR = 6  # AutoCAD magenta — closest index to spec purple #a78bfa.
+_CHAMFER_TEXT_HEIGHT = 2.5  # mm — matches DESIGN.md note about isocp 2.5mm
+_CHAMFER_LEADER_LEN = 8.0  # mm — short pointer line from anchor to label
+
 
 def export_clean_dxf(
     source: Path | str,
     deleted_ids: set[str],
     dest: Path | str,
     extra_polylines: Iterable[dict] | None = None,
+    chamfer_annotations: Iterable[dict] | None = None,
 ) -> int:
     """Copy ``source`` to ``dest`` minus the modelspace entities with the
     given deterministic IDs (``e00001`` etc., assigned at parse time).
@@ -80,13 +91,48 @@ def export_clean_dxf(
             except Exception as exc:  # noqa: BLE001 - bad input shouldn't kill export
                 log.warning("skipping malformed extra polyline: %s", exc)
 
+    # Append chamfer / bevel annotations (Phase 3). One LEADER + one
+    # MTEXT per spec, all on ``CUTFLOW_CHAMFER`` so downstream operators
+    # can isolate them with a single layer freeze.
+    notes_added = 0
+    if chamfer_annotations:
+        _ensure_layer(doc, _CHAMFER_LAYER, _CHAMFER_COLOR)
+        for ann in chamfer_annotations:
+            anchor = ann.get("anchor")
+            text = str(ann.get("text") or "")
+            if not anchor or len(anchor) < 2 or not text:
+                continue
+            try:
+                ax = float(anchor[0])
+                ay = float(anchor[1])
+                tx = ax + _CHAMFER_LEADER_LEN
+                ty = ay + _CHAMFER_LEADER_LEN
+                # LEADER from the anchor up-right to the text insert.
+                msp.add_leader(
+                    [(ax, ay), (tx, ty)],
+                    dxfattribs={"layer": _CHAMFER_LAYER, "color": _CHAMFER_COLOR},
+                )
+                msp.add_mtext(
+                    text,
+                    dxfattribs={
+                        "layer": _CHAMFER_LAYER,
+                        "color": _CHAMFER_COLOR,
+                        "char_height": _CHAMFER_TEXT_HEIGHT,
+                        "insert": (tx + 0.5, ty + 0.5),
+                    },
+                )
+                notes_added += 1
+            except Exception as exc:  # noqa: BLE001 - malformed annotation should not abort export
+                log.warning("skipping malformed chamfer annotation: %s", exc)
+
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(dest))
     log.info(
-        "exported %s (removed %d, added %d) — total now %d entities",
+        "exported %s (removed %d, added %d polylines, %d notes) — total now %d entities",
         dest,
         len(to_remove),
         added,
+        notes_added,
         sum(1 for _ in msp),
     )
     return len(to_remove)

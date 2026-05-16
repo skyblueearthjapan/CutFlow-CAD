@@ -209,6 +209,9 @@ class SessionStore:
     def offset_path(self, sid: str, fid: str) -> Path:
         return self._state_dir(sid, fid) / "offset.json"
 
+    def chamfer_path(self, sid: str, fid: str) -> Path:
+        return self._state_dir(sid, fid) / "chamfer.json"
+
     def read_outer(self, sid: str, fid: str) -> dict | None:
         """Return the persisted outer-loop result, or ``None`` if unset."""
 
@@ -254,6 +257,32 @@ class SessionStore:
         target = self.offset_path(sid, fid)
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix=".offset.", suffix=".json", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def read_chamfer(self, sid: str, fid: str) -> dict | None:
+        path = self.chamfer_path(sid, fid)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("chamfer.json unreadable for %s/%s: %s", sid, fid, exc)
+            return None
+
+    def write_chamfer(self, sid: str, fid: str, payload: dict) -> None:
+        self.get(sid)
+        target = self.chamfer_path(sid, fid)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".chamfer.", suffix=".json", dir=str(target.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)

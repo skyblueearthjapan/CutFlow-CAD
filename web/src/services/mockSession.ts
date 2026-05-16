@@ -12,13 +12,20 @@
 
 import type {
   BoundingBox,
+  ChamferAnnotation,
+  ChamferGeometry,
+  ChamferSpec,
+  CleanupFrameResult,
+  CornerInfo,
   DeleteCandidates,
   DeleteResult,
+  EdgeInfo,
   Entity,
   FileData,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
+  PdfExportOptions,
   Session,
   SessionFile,
 } from '../types/dxf';
@@ -26,6 +33,8 @@ import type {
 interface MockBundle {
   session: Session;
   files: Map<string, FileData>;
+  /** Per-file chamfer specs (Phase 3 mock). */
+  chamfer: Map<string, ChamferSpec[]>;
 }
 
 const _store = new Map<string, MockBundle>();
@@ -241,7 +250,7 @@ export async function mockUploadFiles(files: File[]): Promise<Session> {
     files: sessionFiles,
     expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   };
-  _store.set(sid, { session, files: fileMap });
+  _store.set(sid, { session, files: fileMap, chamfer: new Map() });
   return session;
 }
 
@@ -501,4 +510,156 @@ export async function mockComputeOffset(
     material_efficiency: efficiency,
     warnings: [],
   };
+}
+
+/* -------------------- Phase 3: chamfer / cleanup-frame / pdf -------------- */
+
+/** Locate the bundle for the chamfer/frame/pdf mock endpoints. */
+function locateBundle(sid: string): MockBundle {
+  const bundle = _store.get(sid);
+  if (!bundle) throw new Error(`mock: unknown session ${sid}`);
+  return bundle;
+}
+
+/** Build the corner + edge records from the file's bounding box.
+ *
+ *  The sample geometry is a rounded rectangle, so we synthesize the four
+ *  convex corners at the bbox extents (C1: top-right, C2: top-left,
+ *  C3: bottom-left, C4: bottom-right) — matching the labels the v3 mockup
+ *  uses on its corner-chip list. Edges (E1..E4) follow the same CCW order
+ *  starting at the top side. (C1, H1) */
+export async function mockGetCorners(
+  sid: string,
+  fid: string,
+): Promise<{ corners: CornerInfo[]; edges: EdgeInfo[] }> {
+  await new Promise((r) => setTimeout(r, 80));
+  const file = locateFile(sid, fid);
+  // The sample DXF has a rounded rectangle outer (margin r=20). We pick the
+  // 4 visual corners just inside the rounding so the marker sits on the
+  // outer edge. The exact value is cosmetic — backend supplies real ones.
+  const bb = file.bounding_box;
+  const r = 20;
+  const xR = bb.max_x - 90 - r;
+  const xL = bb.min_x + 90 + r;
+  const yT = bb.max_y - 90 - r;
+  const yB = bb.min_y + 90 + r;
+  const corners: CornerInfo[] = [
+    { corner_id: 'C1', position: [xR, yT], angle_deg: 90, is_acute: false, is_convex: true },  // 右上
+    { corner_id: 'C2', position: [xL, yT], angle_deg: 90, is_acute: false, is_convex: true },  // 左上
+    { corner_id: 'C3', position: [xL, yB], angle_deg: 90, is_acute: false, is_convex: true },  // 左下
+    { corner_id: 'C4', position: [xR, yB], angle_deg: 90, is_acute: false, is_convex: true },  // 右下
+  ];
+  const w = xR - xL;
+  const h = yT - yB;
+  const edges: EdgeInfo[] = [
+    { edge_id: 'E1', midpoint: [(xR + xL) / 2, yT], length: w },  // top
+    { edge_id: 'E2', midpoint: [xL, (yT + yB) / 2], length: h },  // left
+    { edge_id: 'E3', midpoint: [(xR + xL) / 2, yB], length: w },  // bottom
+    { edge_id: 'E4', midpoint: [xR, (yT + yB) / 2], length: h },  // right
+  ];
+  return { corners, edges };
+}
+
+/** Build chamfer annotations from specs + corner / edge positions.
+ *  Backend format: `{ corner_id, position, label, kind }` (H2). */
+function buildChamferGeometry(
+  specs: ChamferSpec[],
+  corners: CornerInfo[],
+  edges: EdgeInfo[],
+): ChamferGeometry {
+  const byCorner = new Map(corners.map((c) => [c.corner_id, c]));
+  const byEdge = new Map(edges.map((e) => [e.edge_id, e]));
+  const items: ChamferAnnotation[] = [];
+  for (const s of specs) {
+    const c = byCorner.get(s.corner_id);
+    if (c) {
+      items.push({
+        corner_id: s.corner_id,
+        position: [c.position[0], c.position[1]],
+        label: s.type === 'bevel' ? `開先 ${s.angle_deg}°` : `C${s.size_mm}`,
+        kind: s.type === 'bevel' ? 'bevel' : 'C',
+      });
+      continue;
+    }
+    const e = byEdge.get(s.corner_id);
+    if (e) {
+      items.push({
+        corner_id: s.corner_id,
+        position: [e.midpoint[0], e.midpoint[1]],
+        label: s.type === 'bevel' ? `開先 ${s.angle_deg}°` : `C${s.size_mm}`,
+        kind: s.type === 'bevel' ? 'bevel' : 'C',
+      });
+    }
+  }
+  return { items };
+}
+
+export async function mockSetChamfer(
+  sid: string,
+  fid: string,
+  specs: ChamferSpec[],
+): Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry }> {
+  await new Promise((r) => setTimeout(r, 100));
+  const bundle = locateBundle(sid);
+  // Mirror the backend: full replace.
+  bundle.chamfer.set(fid, [...specs]);
+  const { corners, edges } = await mockGetCorners(sid, fid);
+  return { specs: [...specs], geometry: buildChamferGeometry(specs, corners, edges) };
+}
+
+export async function mockGetChamfer(
+  sid: string,
+  fid: string,
+): Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry } | null> {
+  const bundle = locateBundle(sid);
+  const specs = bundle.chamfer.get(fid);
+  if (!specs) return null;
+  const { corners, edges } = await mockGetCorners(sid, fid);
+  return { specs: [...specs], geometry: buildChamferGeometry(specs, corners, edges) };
+}
+
+export async function mockCleanupFrame(
+  sid: string,
+  fid: string,
+): Promise<CleanupFrameResult> {
+  await new Promise((r) => setTimeout(r, 120));
+  const file = locateFile(sid, fid);
+  // The sample data tags one entity with category 'frame' — use those ids.
+  const frameIds = file.entities
+    .filter((e) => e.category === 'frame')
+    .map((e) => e.id);
+  // Mirror live backend: stage for deletion via deleted_ids so the canvas
+  // hides them immediately on next file fetch.
+  const next = new Set(file.deleted_ids ?? []);
+  for (const id of frameIds) next.add(id);
+  file.deleted_ids = [...next].sort();
+  return { removed_count: frameIds.length, frame_entity_ids: frameIds };
+}
+
+export async function mockExportPdf(
+  sid: string,
+  fid: string,
+  opts: PdfExportOptions,
+): Promise<Blob> {
+  await new Promise((r) => setTimeout(r, 150));
+  const file = locateFile(sid, fid);
+  // Synthesise a minimal-but-valid PDF so the download flow can be tested
+  // without ReportLab in the loop. The contents only need to identify
+  // themselves as PDF (header) and end (EOF); browsers will open / save it.
+  const note =
+    `% mock pdf for ${file.name}\n` +
+    `% frame=${opts.frame} with_offset=${opts.with_offset} with_chamfer=${opts.with_chamfer}\n`;
+  const body =
+    '%PDF-1.4\n' +
+    note +
+    '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n' +
+    '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n' +
+    '3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >> endobj\n' +
+    'xref\n0 4\n' +
+    '0000000000 65535 f \n' +
+    '0000000009 00000 n \n' +
+    '0000000058 00000 n \n' +
+    '0000000110 00000 n \n' +
+    'trailer << /Size 4 /Root 1 0 R >>\nstartxref\n179\n%%EOF\n';
+  return new Blob([body], { type: 'application/pdf' });
 }

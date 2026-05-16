@@ -9,11 +9,14 @@
  *      to mirror the server filter (H3).
  * - Both pickers are registered with the session store on mount so other
  *   components (TabBar) can open them without DOM queries (M4).
- * - The "DXF を書き出す" button calls the session export action.
- * - The title-block becomes dynamic once a file is open (file name + count).
+ * - Phase 3: the single "DXF を書き出す" button becomes a 📤 出力 dropdown
+ *   that lets the user pick DXF (with offset toggle) or PDF (枠あり/枠なし
+ *   ラジオ + 加工代 / C面 込みのチェックボックス). The export action runs
+ *   when the user clicks "ダウンロード" in the sub-panel.
  *
  * The HTML structure / classes are preserved 1:1 with the v3 mockup so the
- * design stays pixel-perfect.
+ * design stays pixel-perfect. The dropdown is an extra layer that opens
+ * below the primary button — no other elements move.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useSession } from '../stores/session';
@@ -28,18 +31,59 @@ const {
   offsetResult,
   registerFilePicker,
   registerFolderPicker,
+  // Phase 3
+  pdfExportOptions,
+  pdfMaterial,
+  isExportingPdf,
+  setPdfFrameOption,
+  setPdfWithOffset,
+  setPdfWithChamfer,
+  setPdfMaterial,
+  exportPdf,
 } = useSession();
 
-/** When an offset preview has been computed for the active file we export
- *  the offset-embedded DXF; otherwise we send the plain cleaned DXF. This
- *  keeps the header button as a single entry point (matches the v3 mockup
- *  which has only one DXF export action). */
-function onExportClick() {
-  if (offsetResult.value) {
-    exportDxfWithOffset();
+/** Format radio + checkbox state local to the dropdown UI. */
+const exportFormat = ref<'dxf' | 'pdf'>('dxf');
+/** Mirror of the offset-export flag for DXF (defaults to ON when an offset
+ *  preview has been computed). The Phase 2 single-button behaviour is kept
+ *  by binding this to the same condition. */
+const dxfWithOffset = ref<boolean>(true);
+
+/** Open / close state for the export dropdown. */
+const exportOpen = ref(false);
+const exportRoot = ref<HTMLElement | null>(null);
+function toggleExport() {
+  if (!currentFile.value) return;
+  exportOpen.value = !exportOpen.value;
+}
+function closeExport() {
+  exportOpen.value = false;
+}
+
+/** Click-outside / Escape to close the dropdown. */
+function onDocClick(e: MouseEvent) {
+  if (!exportOpen.value) return;
+  const root = exportRoot.value;
+  if (root && !root.contains(e.target as Node)) closeExport();
+}
+function onDocKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeExport();
+}
+
+async function onDownload() {
+  if (exportFormat.value === 'dxf') {
+    // Honour both the offset checkbox AND whether an offset result actually
+    // exists — if the user toggled it on without computing, fall back to the
+    // plain export so we never POST `with_offset=true` against an empty cache.
+    if (dxfWithOffset.value && offsetResult.value) {
+      await exportDxfWithOffset();
+    } else {
+      await exportDxf();
+    }
   } else {
-    exportDxf();
+    await exportPdf();
   }
+  closeExport();
 }
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -55,10 +99,14 @@ function openFolder() {
 onMounted(() => {
   registerFilePicker(openFile);
   registerFolderPicker(openFolder);
+  document.addEventListener('mousedown', onDocClick);
+  document.addEventListener('keydown', onDocKey);
 });
 onUnmounted(() => {
   registerFilePicker(() => undefined);
   registerFolderPicker(() => undefined);
+  document.removeEventListener('mousedown', onDocClick);
+  document.removeEventListener('keydown', onDocKey);
 });
 
 async function onFilesChosen(e: Event) {
@@ -147,11 +195,184 @@ const titleParts = computed(() => {
         フォルダ
         <span class="kbd">📁</span>
       </button>
-      <button class="btn primary" @click="onExportClick" :disabled="!currentFile">
-        <svg><use href="#i-output" /></svg>
-        {{ offsetResult ? 'DXF を書き出す (加工代込)' : 'DXF を書き出す' }}
-      </button>
+
+      <!-- Phase 3: export dropdown — DXF / PDF picker -->
+      <div class="export-menu" ref="exportRoot">
+        <button
+          class="btn primary"
+          :disabled="!currentFile"
+          @click="toggleExport"
+          :aria-expanded="exportOpen"
+        >
+          <svg><use href="#i-output" /></svg>
+          出力
+          <span style="font-size:10px;margin-left:2px">▾</span>
+        </button>
+        <div v-if="exportOpen" class="export-panel" @click.stop>
+          <div class="ex-row">
+            <label class="ex-radio">
+              <input type="radio" v-model="exportFormat" value="dxf" />
+              <span>DXF</span>
+            </label>
+            <label class="ex-radio">
+              <input type="radio" v-model="exportFormat" value="pdf" />
+              <span>PDF</span>
+            </label>
+          </div>
+
+          <!-- DXF options -->
+          <template v-if="exportFormat === 'dxf'">
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                v-model="dxfWithOffset"
+                :disabled="!offsetResult"
+              />
+              <span>加工代を含める <small v-if="!offsetResult">(未計算)</small></span>
+            </label>
+          </template>
+
+          <!-- PDF options -->
+          <template v-else>
+            <div class="ex-group">
+              <!-- H7: 枠 labels disambiguate cutflow material-take frame
+                   ('auto' falls back to cutflow on the backend so the two
+                   share a "material-take frame" label). -->
+              <div class="ex-glabel">枠</div>
+              <label class="ex-radio">
+                <input
+                  type="radio"
+                  :checked="pdfExportOptions.frame === 'auto'"
+                  @change="setPdfFrameOption('auto')"
+                />
+                <span>自動 (材料取り枠)</span>
+              </label>
+              <label class="ex-radio">
+                <input
+                  type="radio"
+                  :checked="pdfExportOptions.frame === 'cutflow'"
+                  @change="setPdfFrameOption('cutflow')"
+                />
+                <span>材料取り枠</span>
+              </label>
+              <label class="ex-radio">
+                <input
+                  type="radio"
+                  :checked="pdfExportOptions.frame === 'none'"
+                  @change="setPdfFrameOption('none')"
+                />
+                <span>枠なし</span>
+              </label>
+            </div>
+            <!-- H4: material — optional free-text rendered on the PDF header. -->
+            <label class="ex-check ex-material">
+              <span>材質</span>
+              <input
+                type="text"
+                class="ex-input"
+                :value="pdfMaterial"
+                placeholder="例: SS400 t9"
+                @input="setPdfMaterial(($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_offset"
+                @change="setPdfWithOffset(($event.target as HTMLInputElement).checked)"
+                :disabled="!offsetResult"
+              />
+              <span>加工代を含める <small v-if="!offsetResult">(未計算)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_chamfer"
+                @change="setPdfWithChamfer(($event.target as HTMLInputElement).checked)"
+              />
+              <span>C面注記を含める</span>
+            </label>
+          </template>
+
+          <button
+            class="btn primary ex-download"
+            :disabled="!currentFile || isExportingPdf"
+            @click="onDownload"
+          >
+            <svg><use href="#i-output" /></svg>
+            {{ isExportingPdf ? '出力中…' : 'ダウンロード' }}
+          </button>
+        </div>
+      </div>
+
       <div class="user-chip">YT</div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.export-menu {
+  position: relative;
+  display: inline-flex;
+}
+.export-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  min-width: 240px;
+  padding: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 22px -6px rgba(0, 0, 0, 0.6);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.ex-row {
+  display: flex; gap: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-1);
+}
+.ex-radio, .ex-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px;
+  color: var(--t-1);
+  cursor: pointer;
+}
+.ex-radio input, .ex-check input {
+  accent-color: var(--cy);
+  cursor: pointer;
+}
+.ex-check small { color: var(--t-4); font-size: 10px; margin-left: 2px; }
+.ex-group {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ex-glabel {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--t-4);
+  margin-bottom: 4px;
+}
+.ex-download {
+  margin-top: 4px;
+  height: 30px;
+  justify-content: center;
+}
+.ex-material {
+  gap: 8px;
+}
+.ex-input {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 12px;
+  background: var(--bg-1);
+  color: var(--t-1);
+  border: 1px solid var(--line-1);
+  border-radius: 4px;
+  outline: none;
+  font-family: var(--f-mono);
+}
+.ex-input:focus { border-color: var(--cy); }
+</style>

@@ -20,14 +20,20 @@
 import { computed, ref, shallowRef } from 'vue';
 import * as api from '../services/api';
 import type {
+  ChamferGeometry,
+  ChamferSpec,
+  CornerInfo,
   CornerJoin,
   DeleteCategoryKey,
   DeleteCategoryRow,
+  EdgeInfo,
   Entity,
   FileData,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
+  PdfExportOptions,
+  PdfFrameOption,
   Session,
 } from '../types/dxf';
 import { useActiveTool } from './activeTool';
@@ -56,6 +62,41 @@ const _manualMode = ref(false);
 const _defaultOffsetMm = ref<number>(3.0);
 const _edgeOverrides = ref<Record<string, number>>({});
 const _cornerJoin = ref<CornerJoin>('arc');
+
+/* ------------------- Phase 3 — chamfer / PDF / cleanup-frame --------------- */
+/** Per-file corner list (from /corners). */
+const _cornersByFile = shallowRef<Map<string, CornerInfo[]>>(new Map());
+/** Per-file edge list (from /corners — used by the 開先/bevel UI). */
+const _edgesByFile = shallowRef<Map<string, EdgeInfo[]>>(new Map());
+/** Per-file chamfer specs keyed by file_id; UI-source of truth (post-server
+ *  mutations apply server-returned specs back to this map). */
+const _chamferByFile = shallowRef<Map<string, ChamferSpec[]>>(new Map());
+/** Per-file chamfer geometry (annotations for canvas markers). */
+const _chamferGeometryByFile = shallowRef<Map<string, ChamferGeometry>>(new Map());
+/** Last cleanup-frame result for the active file (for the Inspector summary). */
+const _lastFrameCleanup = ref<{ removed_count: number; ids: string[] } | null>(null);
+/** PDF export options (single config shared across files — matches how the
+ *  header dropdown is presented to the user). Defaults are OFF so a
+ *  user-clicked "ダウンロード" never trips the backend's 422 guards (which
+ *  require pre-computed offset / confirmed outer before they can be true).
+ *  The user opts in explicitly by ticking the boxes. (C2) */
+const _pdfExportOptions = ref<PdfExportOptions>({
+  frame: 'none',
+  with_offset: false,
+  with_chamfer: false,
+});
+/** Default chamfer values surfaced in the inspector num-step. C面 size is in
+ *  mm (Cn); the bevel angle is in degrees and only applies to ``type='bevel'``
+ *  specs (H6 — C面 is fixed at 45° by convention so we never plumb angle into
+ *  the C-面 spec from the UI). */
+const _chamferDefaultSize = ref<number>(2);    // C2
+const _chamferDefaultAngle = ref<number>(30);  // 30° (bevel only)
+/** Optional material text shown on the PDF header (H4). */
+const _pdfMaterial = ref<string>('');
+const _isLoadingCorners = ref(false);
+const _isApplyingChamfer = ref(false);
+const _isExportingPdf = ref(false);
+const _isCleaningFrame = ref(false);
 /**
  * File-picker openers registered by Header.vue on mount (M4). TabBar and any
  * other component that needs to trigger the upload UI calls these instead of
@@ -174,6 +215,42 @@ const outerEntityIdSet = computed<Set<string>>(() => {
   return new Set(outerDetection.value?.outer_loop ?? []);
 });
 
+/** Corners for the active file (empty until /corners is loaded). */
+const corners = computed<CornerInfo[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _cornersByFile.value.get(fid) ?? [];
+});
+
+/** Edges for the active file (empty until /corners is loaded). Used by the
+ *  開先 (bevel) UI — operator picks an edge to mark a chamfer note for. */
+const edges = computed<EdgeInfo[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _edgesByFile.value.get(fid) ?? [];
+});
+
+/** Chamfer specs for the active file. */
+const chamferSpecs = computed<ChamferSpec[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _chamferByFile.value.get(fid) ?? [];
+});
+
+/** Chamfer geometry annotations for the active file. */
+const chamferGeometry = computed<ChamferGeometry | null>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return null;
+  return _chamferGeometryByFile.value.get(fid) ?? null;
+});
+
+/** Map corner_id → spec for O(1) lookup in UI/canvas. */
+const chamferSpecByCorner = computed<Map<string, ChamferSpec>>(() => {
+  const map = new Map<string, ChamferSpec>();
+  for (const s of chamferSpecs.value) map.set(s.corner_id, s);
+  return map;
+});
+
 /* ----------------------------- Helpers ---------------------------------- */
 
 function setError(msg: string | null) {
@@ -264,6 +341,9 @@ export function useSession() {
     _currentFileId.value = fid;
     _selectedForDelete.value = new Set();
     _manualMode.value = false;
+    // Phase 3: the cleanup-frame banner is per-action, not per-file —
+    // clear it so the green strip from file A doesn't leak into file B.
+    _lastFrameCleanup.value = null;
     if (!_files.value.has(fid)) await loadFile(fid);
   }
 
@@ -278,10 +358,11 @@ export function useSession() {
     setError(null);
     _isLoadingFile.value = true;
     try {
-      const [data, outer, offset] = await Promise.all([
+      const [data, outer, offset, chamfer] = await Promise.all([
         api.getFile(sid, fid),
         api.getOuter(sid, fid).catch(() => null),
         api.getOffset(sid, fid).catch(() => null),
+        api.getChamfer(sid, fid).catch(() => null),
       ]);
       // shallowRef requires assigning a new Map ref to trigger updates.
       const next = new Map(_files.value);
@@ -289,6 +370,10 @@ export function useSession() {
       _files.value = next;
       if (outer) setMapEntry(_outerByFile, fid, outer);
       if (offset) setMapEntry(_offsetByFile, fid, offset);
+      if (chamfer) {
+        setMapEntry(_chamferByFile, fid, chamfer.specs);
+        setMapEntry(_chamferGeometryByFile, fid, chamfer.geometry);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'ファイルの読み込みに失敗しました');
     } finally {
@@ -545,6 +630,169 @@ export function useSession() {
     _cornerJoin.value = join;
   }
 
+  /* -------------------- Phase 3 — chamfer / pdf / frame ------------------- */
+
+  /** Fetch the outer-loop corners + edges for the active file (idempotent).
+   *  H1: edges power the 開先/bevel UI section in the Inspector. */
+  async function loadCorners(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    // Skip if already loaded (corners are stable per file).
+    if (_cornersByFile.value.has(fid)) return;
+    _isLoadingCorners.value = true;
+    try {
+      const res = await api.getCorners(sid, fid);
+      setMapEntry(_cornersByFile, fid, res.corners);
+      setMapEntry(_edgesByFile, fid, res.edges);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '角の取得に失敗しました');
+    } finally {
+      _isLoadingCorners.value = false;
+    }
+  }
+
+  /** Force re-fetch of the persisted chamfer + geometry. */
+  async function loadChamfer(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      const ch = await api.getChamfer(sid, fid);
+      if (ch) {
+        setMapEntry(_chamferByFile, fid, ch.specs);
+        setMapEntry(_chamferGeometryByFile, fid, ch.geometry);
+      } else {
+        setMapEntry(_chamferByFile, fid, []);
+        setMapEntry(_chamferGeometryByFile, fid, { items: [] });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'C面情報の取得に失敗しました');
+    }
+  }
+
+  /** Internal: POST the current spec list for the active file. */
+  async function syncChamfer(specs: ChamferSpec[]): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    _isApplyingChamfer.value = true;
+    try {
+      const res = await api.setChamfer(sid, fid, specs);
+      setMapEntry(_chamferByFile, fid, res.specs);
+      setMapEntry(_chamferGeometryByFile, fid, res.geometry);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'C面の適用に失敗しました');
+    } finally {
+      _isApplyingChamfer.value = false;
+    }
+  }
+
+  /** Add or update a single corner's chamfer spec. */
+  async function setChamferSpec(spec: ChamferSpec): Promise<void> {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    const current = _chamferByFile.value.get(fid) ?? [];
+    const next = current.filter((s) => s.corner_id !== spec.corner_id);
+    next.push(spec);
+    await syncChamfer(next);
+  }
+
+  /** Remove the chamfer spec for a single corner. */
+  async function removeChamferSpec(corner_id: string): Promise<void> {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    const current = _chamferByFile.value.get(fid) ?? [];
+    const next = current.filter((s) => s.corner_id !== corner_id);
+    if (next.length === current.length) return;
+    await syncChamfer(next);
+  }
+
+  /** Clear every chamfer spec for the active file. */
+  async function clearChamfer(): Promise<void> {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    const current = _chamferByFile.value.get(fid) ?? [];
+    if (current.length === 0) return;
+    await syncChamfer([]);
+  }
+
+  function setChamferDefaultSize(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    _chamferDefaultSize.value = Math.max(0.5, Math.min(50, Number(mm.toFixed(1))));
+  }
+  function setChamferDefaultAngle(deg: number): void {
+    if (!Number.isFinite(deg)) return;
+    _chamferDefaultAngle.value = Math.max(5, Math.min(90, Math.round(deg)));
+  }
+
+  /** POST /cleanup-frame — reserve the frame entities for deletion and
+   *  refresh the file so they disappear from the canvas. */
+  async function cleanupFrame(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) {
+      setError('開いているDXFがありません');
+      return;
+    }
+    setError(null);
+    _isCleaningFrame.value = true;
+    try {
+      const res = await api.cleanupFrame(sid, fid);
+      _lastFrameCleanup.value = {
+        removed_count: res.removed_count,
+        ids: res.frame_entity_ids,
+      };
+      // Refresh the file so deleted_ids includes the new ids.
+      await loadFile(fid);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '製作図枠の削除に失敗しました');
+    } finally {
+      _isCleaningFrame.value = false;
+    }
+  }
+
+  function setPdfFrameOption(frame: PdfFrameOption): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, frame };
+  }
+  function setPdfWithOffset(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_offset: on };
+  }
+  function setPdfWithChamfer(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_chamfer: on };
+  }
+  /** Update the optional material string that lands on the PDF header (H4). */
+  function setPdfMaterial(text: string): void {
+    _pdfMaterial.value = text;
+    _pdfExportOptions.value = {
+      ..._pdfExportOptions.value,
+      material: text.trim() ? text : undefined,
+    };
+  }
+
+  /** Download the PDF using the supplied (or stored) options. */
+  async function exportPdf(opts?: Partial<PdfExportOptions>): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    const file = currentFile.value;
+    if (!sid || !fid || !file) {
+      setError('開いているDXFがありません');
+      return;
+    }
+    setError(null);
+    _isExportingPdf.value = true;
+    try {
+      const effective: PdfExportOptions = { ..._pdfExportOptions.value, ...(opts ?? {}) };
+      const blob = await api.exportPdf(sid, fid, effective);
+      const base = file.name.replace(/\.[Dd][Xx][Ff]$/, '');
+      downloadBlob(blob, `${base}.pdf`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'PDF出力に失敗しました');
+    } finally {
+      _isExportingPdf.value = false;
+    }
+  }
+
   return {
     // state
     currentSession: _currentSession,
@@ -565,6 +813,16 @@ export function useSession() {
     defaultOffsetMm: _defaultOffsetMm,
     edgeOverrides: _edgeOverrides,
     cornerJoin: _cornerJoin,
+    // Phase 3 state
+    pdfExportOptions: _pdfExportOptions,
+    pdfMaterial: _pdfMaterial,
+    chamferDefaultSize: _chamferDefaultSize,
+    chamferDefaultAngle: _chamferDefaultAngle,
+    lastFrameCleanup: _lastFrameCleanup,
+    isLoadingCorners: _isLoadingCorners,
+    isApplyingChamfer: _isApplyingChamfer,
+    isExportingPdf: _isExportingPdf,
+    isCleaningFrame: _isCleaningFrame,
     // derived
     deleteRows,
     totalDeleteCandidates,
@@ -573,6 +831,12 @@ export function useSession() {
     offsetResult,
     manualSelection,
     outerEntityIdSet,
+    // Phase 3 derived
+    corners,
+    edges,
+    chamferSpecs,
+    chamferGeometry,
+    chamferSpecByCorner,
     // actions
     uploadFiles,
     selectFile,
@@ -595,6 +859,20 @@ export function useSession() {
     setEdgeOverride,
     clearEdgeOverride,
     setCornerJoin,
+    // Phase 3 actions
+    loadCorners,
+    loadChamfer,
+    setChamferSpec,
+    removeChamferSpec,
+    clearChamfer,
+    setChamferDefaultSize,
+    setChamferDefaultAngle,
+    cleanupFrame,
+    setPdfFrameOption,
+    setPdfWithOffset,
+    setPdfWithChamfer,
+    setPdfMaterial,
+    exportPdf,
     clearError: () => setError(null),
     // picker plumbing (M4)
     registerFilePicker,

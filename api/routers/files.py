@@ -12,19 +12,30 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from models import (
+    ChamferRequest,
+    ChamferResponse,
+    CornersResponse,
     DeleteRequest,
     DeleteResponse,
     FileEntities,
+    FrameCleanupResponse,
     OffsetRequest,
     OffsetResult,
     OuterDetectionResult,
     OuterManualRequest,
 )
 from services import graph as gmod
+from services.chamfer import (
+    build_annotations,
+    chamfer_dxf_extras,
+    list_corners,
+)
 from services.dxf_parser import parse_file
 from services.dxf_writer import export_clean_dxf
+from services.frame_cleanup import detect_frame_entities
 from services.offset import OffsetError, compute_offset
 from services.outer_detector import detect_outer, evaluate_manual
+from services.pdf_export import export_pdf
 from storage import SessionExpired, SessionNotFound, get_store
 
 log = logging.getLogger(__name__)
@@ -309,22 +320,163 @@ async def get_offset(sid: str, fid: str) -> dict:
     return saved
 
 
+@router.get("/corners", response_model=CornersResponse)
+async def get_corners(sid: str, fid: str) -> CornersResponse:
+    """Return ``C1..Cn`` corners + ``E1..En`` edges of the confirmed outer loop.
+
+    Requires that the outer loop has been confirmed (``detect-outer`` or
+    ``outer-manual`` returned ``success``); otherwise returns 422.
+    """
+
+    store, sf = _resolve(sid, fid)
+    saved = store.read_outer(sid, fid)
+    if not saved or not saved.get("loop"):
+        raise HTTPException(
+            status_code=422,
+            detail="先に外径を確定してください (detect-outer / outer-manual)",
+        )
+
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name, outer_ids=list(saved.get("loop") or []))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    loop_ids: list[str] = list(saved["loop"])
+    topo = _build_topo(payload, loop_ids)
+    corners, edges = list_corners(topo, loop_ids)
+    return CornersResponse(corners=corners, edges=edges)
+
+
+@router.post("/chamfer", response_model=ChamferResponse)
+async def post_chamfer(sid: str, fid: str, body: ChamferRequest) -> ChamferResponse:
+    """Persist chamfer / bevel specs and return canvas annotations.
+
+    ``body.specs[]`` is the full replacement list (last write wins) — the
+    UI sends the entire current state on every change so we don't have to
+    reconcile partial diffs server-side.
+    """
+
+    store, sf = _resolve(sid, fid)
+    saved = store.read_outer(sid, fid)
+    if not saved or not saved.get("loop"):
+        raise HTTPException(
+            status_code=422,
+            detail="先に外径を確定してください (detect-outer / outer-manual)",
+        )
+
+    specs = [s.model_dump() for s in body.specs]
+
+    # Validate corner IDs against the confirmed loop.
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name, outer_ids=list(saved["loop"]))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+    loop_ids: list[str] = list(saved["loop"])
+    topo = _build_topo(payload, loop_ids)
+    corners, edges = list_corners(topo, loop_ids)
+    valid_ids = {c["corner_id"] for c in corners} | {e["edge_id"] for e in edges}
+
+    unknown = [s for s in specs if s.get("corner_id") not in valid_ids]
+    if unknown:
+        bad = ", ".join(str(s.get("corner_id")) for s in unknown[:5])
+        raise HTTPException(
+            status_code=422,
+            detail=f"未知の corner_id が含まれています: {bad}",
+        )
+
+    store.write_chamfer(sid, fid, {"specs": specs})
+    items = build_annotations(specs, corners, edges)
+    return ChamferResponse(
+        specs=body.specs,
+        geometry={"type": "annotations", "items": items},
+    )
+
+
+@router.get("/chamfer", response_model=ChamferResponse)
+async def get_chamfer(sid: str, fid: str) -> ChamferResponse:
+    """Return the persisted chamfer specs (empty if unset)."""
+
+    store, sf = _resolve(sid, fid)
+    saved_outer = store.read_outer(sid, fid)
+    saved = store.read_chamfer(sid, fid) or {}
+    specs = list(saved.get("specs") or [])
+
+    items: list[dict] = []
+    if saved_outer and saved_outer.get("loop"):
+        try:
+            payload = parse_file(
+                sf.path, file_id=fid, name=sf.name, outer_ids=list(saved_outer["loop"])
+            )
+            loop_ids: list[str] = list(saved_outer["loop"])
+            topo = _build_topo(payload, loop_ids)
+            corners, edges = list_corners(topo, loop_ids)
+            items = build_annotations(specs, corners, edges)
+        except Exception as exc:  # noqa: BLE001 - annotations are advisory; never block read
+            log.warning("chamfer annotations rebuild failed for %s/%s: %s", sid, fid, exc)
+
+    return ChamferResponse(specs=specs, geometry={"type": "annotations", "items": items})
+
+
+@router.post("/cleanup-frame", response_model=FrameCleanupResponse)
+async def post_cleanup_frame(sid: str, fid: str) -> FrameCleanupResponse:
+    """Detect the production frame / title block and reserve them for delete.
+
+    The classifier's FRAME bucket already covers the dominant case; we
+    add any axis-aligned ISO-aspect rectangle that visually wraps the
+    drawing (split-view drawings). The selected IDs are appended to the
+    per-file delete reservation so a subsequent export drops them.
+    """
+
+    store, sf = _resolve(sid, fid)
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    saved_outer = store.read_outer(sid, fid)
+    outer_loop = list(saved_outer.get("loop") or []) if saved_outer else None
+    frame_ids = detect_frame_entities(payload, outer_loop=outer_loop)
+    if frame_ids:
+        store.update_deleted(sid, fid, frame_ids)
+        store.invalidate_offset(sid, fid)
+    return FrameCleanupResponse(
+        removed_count=len(frame_ids),
+        frame_entity_ids=frame_ids,
+    )
+
+
 @router.get("/export")
 async def export(
     sid: str,
     fid: str,
     format: str = "dxf",
     with_offset: bool = Query(False),
+    with_chamfer: bool = Query(False),
+    with_frame: str = Query("auto"),
+    material: str | None = Query(None),
 ) -> FileResponse:
-    """Stream the cleaned DXF back to the browser as ``<name>_clean.dxf``.
+    """Stream the cleaned drawing back to the browser.
 
-    When ``with_offset=true`` and an offset polygon has been computed for
-    the file, the offset LWPOLYLINE is appended on the ``CUTFLOW_OFFSET``
-    layer so downstream CAM tools can pick it up immediately.
+    ``format`` ∈ {``dxf``, ``pdf``}. ``with_offset``/``with_chamfer`` toggle
+    the optional 加工代 / C面 overlays. ``with_frame`` (``auto`` /
+    ``none`` / ``cutflow``) controls the material-takeoff frame for PDF
+    output and is ignored for DXF exports. ``material`` (H4) is a free-text
+    material label rendered on the PDF header band when supplied; ignored
+    for DXF exports.
     """
 
-    if format != "dxf":
-        raise HTTPException(status_code=400, detail="only format=dxf is supported in Phase 1")
+    if format not in ("dxf", "pdf"):
+        raise HTTPException(
+            status_code=400, detail="format must be 'dxf' or 'pdf'"
+        )
+    if with_frame not in ("auto", "none", "cutflow"):
+        raise HTTPException(
+            status_code=400,
+            detail="with_frame must be one of: auto, none, cutflow",
+        )
 
     store, sf = _resolve(sid, fid)
     deleted = set(store.get_deleted_for_file(sid, fid))
@@ -347,22 +499,99 @@ async def export(
                 "color": 4,
             }]
 
+    chamfer_extras: list[dict] | None = None
+    saved_outer = store.read_outer(sid, fid)
+    if with_chamfer:
+        if not saved_outer or not saved_outer.get("loop"):
+            raise HTTPException(
+                status_code=422,
+                detail="外径未確定です。C面注記を付加するには先に外径を確定してください",
+            )
+        saved_chamfer = store.read_chamfer(sid, fid) or {}
+        specs = list(saved_chamfer.get("specs") or [])
+        if specs:
+            try:
+                payload = parse_file(
+                    sf.path, file_id=fid, name=sf.name, outer_ids=list(saved_outer["loop"])
+                )
+                loop_ids: list[str] = list(saved_outer["loop"])
+                topo = _build_topo(payload, loop_ids)
+                corners, edges = list_corners(topo, loop_ids)
+                chamfer_extras = chamfer_dxf_extras(specs, corners, edges)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chamfer annotation render failed for %s/%s: %s", sid, fid, exc)
+
     out_dir = Path(tempfile.mkdtemp(prefix="cutflow-export-"))
     base = Path(sf.name).stem
-    suffix = "_clean_offset" if with_offset else "_clean"
-    dest = out_dir / f"{base}{suffix}.dxf"
-    try:
-        export_clean_dxf(sf.path, deleted, dest, extra_polylines=extra)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("export failed for %s", sf.path)
-        raise HTTPException(status_code=500, detail=f"export failed: {exc}") from exc
+    suffix_parts = ["clean"]
+    if with_offset:
+        suffix_parts.append("offset")
+    if with_chamfer:
+        suffix_parts.append("chamfer")
+    suffix = "_" + "_".join(suffix_parts)
 
-    # M6: clean up the per-request tempdir after FastAPI finishes streaming
-    # the file back to the client. Without this every export leaks ~10–50KB
-    # of temp space on the host.
+    if format == "dxf":
+        dest = out_dir / f"{base}{suffix}.dxf"
+        try:
+            export_clean_dxf(
+                sf.path,
+                deleted,
+                dest,
+                extra_polylines=extra,
+                chamfer_annotations=chamfer_extras,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("export failed for %s", sf.path)
+            raise HTTPException(status_code=500, detail=f"export failed: {exc}") from exc
+
+        return FileResponse(
+            path=str(dest),
+            filename=f"{base}{suffix}.dxf",
+            media_type="application/dxf",
+            background=BackgroundTask(shutil.rmtree, str(out_dir), ignore_errors=True),
+        )
+
+    # PDF path.
+    dest = out_dir / f"{base}{suffix}.pdf"
+    # Pull metadata from the offset summary if available; otherwise leave None.
+    perimeter_mm: float | None = None
+    plate_size: str | None = None
+    if saved_outer and saved_outer.get("perimeter"):
+        try:
+            perimeter_mm = float(saved_outer["perimeter"])
+        except (TypeError, ValueError):
+            perimeter_mm = None
+    saved_offset = store.read_offset(sid, fid)
+    if saved_offset and saved_offset.get("result"):
+        result = saved_offset["result"]
+        try:
+            if with_offset and result.get("perimeter"):
+                perimeter_mm = float(result["perimeter"])
+        except (TypeError, ValueError):
+            pass
+        if result.get("plate_size"):
+            plate_size = str(result["plate_size"])
+
+    try:
+        export_pdf(
+            sf.path,
+            dest,
+            deleted_ids=deleted,
+            extra_polylines=extra or [],
+            chamfer_annotations=chamfer_extras or [],
+            title=Path(sf.name).stem,
+            material=material if material and material.strip() else None,
+            perimeter_mm=perimeter_mm,
+            plate_size=plate_size,
+            frame=with_frame,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("pdf export failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"pdf export failed: {exc}") from exc
+
     return FileResponse(
         path=str(dest),
-        filename=f"{base}{suffix}.dxf",
-        media_type="application/dxf",
+        filename=f"{base}{suffix}.pdf",
+        media_type="application/pdf",
         background=BackgroundTask(shutil.rmtree, str(out_dir), ignore_errors=True),
     )
