@@ -153,11 +153,21 @@ const deletePillText = computed(() => {
   return `${totalDeleteCandidates.value} 件`;
 });
 
-/** Toggle handler for the rect-select sub-mode button. The store reset
- *  logic (clears invert when turning off) keeps the panel in a predictable
- *  shape so users always come back to "inside" mode as the default. */
-function toggleRectMode(): void {
-  setRectSelectMode(!rectSelectMode.value);
+/** 3-way selection mode for the delete panel:
+ *  - 'single': click 1本ずつ追加/取消 (デフォルト)
+ *  - 'rect-inside': ドラッグした矩形の内側を一括選択
+ *  - 'rect-outside': 矩形の外側を一括選択 (部品本体だけ残す用途)
+ */
+function setSelectionMode(mode: 'single' | 'rect-inside' | 'rect-outside'): void {
+  if (mode === 'single') {
+    setRectSelectMode(false);
+  } else if (mode === 'rect-inside') {
+    setRectSelectMode(true);
+    setRectInvert(false);
+  } else {
+    setRectSelectMode(true);
+    setRectInvert(true);
+  }
 }
 
 /* -------------------- Phase 2 — outer helpers ---------------------------- */
@@ -930,53 +940,55 @@ watch(
             </button>
           </div>
 
-          <!-- 矩形範囲で選択 — カテゴリ別では拾えない表題欄テキストや注記を
-               一掃するためのキャンバス側ツール。本体は CanvasArea.vue が
-               mousedown/mousemove/mouseup で受けて store の selectByRect に
-               コミットする。invert を ON にすると「矩形の外」(=部品だけ
-               残す) 選択に切り替わる。 -->
+          <!-- 選択モード切替 — 単一クリック (デフォルト) / 矩形範囲内 /
+               矩形範囲外 の 3-way ラジオ。CanvasArea.vue が activeTool +
+               rectSelectMode + rectSelectInvert を見て分岐する。 -->
           <div v-if="currentFile" class="section-block rect-block">
-            <h6 class="lbl">矩形範囲で選択</h6>
-            <div class="rect-tools">
-              <button
-                :class="['toggle-btn', rectSelectMode ? 'on' : '']"
-                @click="toggleRectMode"
-              >
-                {{ rectSelectMode ? '✓ 矩形選択 ON' : '矩形選択 OFF' }}
-              </button>
-              <div v-if="rectSelectMode" class="rect-mode-switch">
-                <label>
-                  <input
-                    type="radio"
-                    name="rect-invert"
-                    :checked="!rectSelectInvert"
-                    @change="setRectInvert(false)"
-                  />
-                  範囲内を選択
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    name="rect-invert"
-                    :checked="rectSelectInvert"
-                    @change="setRectInvert(true)"
-                  />
-                  範囲外を選択 (部品だけ残す)
-                </label>
-                <label v-if="rectSelectInvert" class="rect-protect">
-                  <input
-                    type="checkbox"
-                    :checked="protectOuterFromRect"
-                    @change="setProtectOuterFromRect(
-                      ($event.target as HTMLInputElement).checked
-                    )"
-                  />
-                  外径を保護 (推奨)
-                </label>
-              </div>
+            <h6 class="lbl">選択モード</h6>
+            <div class="rect-mode-switch select-mode-switch">
+              <label>
+                <input
+                  type="radio"
+                  name="select-mode"
+                  :checked="!rectSelectMode"
+                  @change="setSelectionMode('single')"
+                />
+                単一クリック選択 <small>(デフォルト)</small>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="select-mode"
+                  :checked="rectSelectMode && !rectSelectInvert"
+                  @change="setSelectionMode('rect-inside')"
+                />
+                矩形範囲を選択
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="select-mode"
+                  :checked="rectSelectMode && rectSelectInvert"
+                  @change="setSelectionMode('rect-outside')"
+                />
+                矩形範囲外を選択 <small>(部品だけ残す)</small>
+              </label>
+              <label v-if="rectSelectMode && rectSelectInvert" class="rect-protect">
+                <input
+                  type="checkbox"
+                  :checked="protectOuterFromRect"
+                  @change="setProtectOuterFromRect(
+                    ($event.target as HTMLInputElement).checked
+                  )"
+                />
+                外径を保護 (推奨)
+              </label>
             </div>
-            <p v-if="rectSelectMode" class="lead">
-              キャンバス上でドラッグ →
+            <p class="lead" v-if="!rectSelectMode">
+              キャンバスで線をクリック → 1本ずつ選択リストに追加・取り消し
+            </p>
+            <p class="lead" v-else>
+              キャンバスでドラッグ →
               <em>{{ rectSelectInvert ? '矩形の外' : '矩形の内' }}</em>
               の要素を選択リストに追加
             </p>
