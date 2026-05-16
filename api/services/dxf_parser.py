@@ -66,21 +66,32 @@ def load_document(path: Path | str) -> Drawing:
 # because the LRU is approximated via insertion-order eviction. The cached
 # payload has per-request fields cleared so cache hits never leak stale
 # file_id/deleted_ids to other callers (M2).
-_PARSE_CACHE: dict[tuple[str, int, int], FileEntities] = {}
+_PARSE_CACHE: dict[tuple[str, int, int, tuple[str, ...]], FileEntities] = {}
 _PARSE_CACHE_MAX = 8
 
 
-def parse_file(path: Path | str, file_id: str, name: str) -> FileEntities:
+def parse_file(
+    path: Path | str,
+    file_id: str,
+    name: str,
+    outer_ids: list[str] | None = None,
+) -> FileEntities:
     """End-to-end: read DXF, build per-entity dicts, classify, return payload.
 
-    Cached by ``(path, mtime, size)`` — the second call for an unchanged file
-    is near-instant.
+    Cached by ``(path, mtime, size, outer_ids)`` — the second call for an
+    unchanged file with the same confirmed outer-loop is near-instant. The
+    ``outer_ids`` argument (H1) is forwarded to ``classify_entities`` so
+    re-classification after detection cannot demote any confirmed outer
+    entity into the FRAME bucket.
     """
 
     p = Path(path)
+    outer_tuple: tuple[str, ...] = tuple(sorted(outer_ids or ()))
     try:
         st = p.stat()
-        key: tuple[str, int, int] | None = (str(p), st.st_mtime_ns, st.st_size)
+        key: tuple[str, int, int, tuple[str, ...]] | None = (
+            str(p), st.st_mtime_ns, st.st_size, outer_tuple,
+        )
     except OSError:
         key = None
 
@@ -90,7 +101,7 @@ def parse_file(path: Path | str, file_id: str, name: str) -> FileEntities:
         # but the request-bound metadata reflects this caller.
         return cached.model_copy(update={"file_id": file_id, "name": name, "deleted_ids": []})
 
-    payload = _do_parse(path, file_id, name)
+    payload = _do_parse(path, file_id, name, outer_ids=outer_ids)
     if key is not None:
         cacheable = payload.model_copy(update={"file_id": "", "name": p.name, "deleted_ids": []})
         _PARSE_CACHE[key] = cacheable
@@ -99,7 +110,12 @@ def parse_file(path: Path | str, file_id: str, name: str) -> FileEntities:
     return payload
 
 
-def _do_parse(path: Path | str, file_id: str, name: str) -> FileEntities:
+def _do_parse(
+    path: Path | str,
+    file_id: str,
+    name: str,
+    outer_ids: list[str] | None = None,
+) -> FileEntities:
     """The real parse implementation (was the body of ``parse_file``)."""
 
     doc = load_document(path)
@@ -123,7 +139,7 @@ def _do_parse(path: Path | str, file_id: str, name: str) -> FileEntities:
         raw_for_classifier.append((eid, e, geom))
 
     # Run the (heuristic) classifier and patch categories in place.
-    categories, candidates = classify_entities(raw_for_classifier, doc)
+    categories, candidates = classify_entities(raw_for_classifier, doc, outer_ids=outer_ids)
     for ent in entities:
         ent.category = categories.get(ent.id, "other")
 

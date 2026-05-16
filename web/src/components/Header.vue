@@ -24,9 +24,23 @@ const {
   isUploading,
   uploadFiles,
   exportDxf,
+  exportDxfWithOffset,
+  offsetResult,
   registerFilePicker,
   registerFolderPicker,
 } = useSession();
+
+/** When an offset preview has been computed for the active file we export
+ *  the offset-embedded DXF; otherwise we send the plain cleaned DXF. This
+ *  keeps the header button as a single entry point (matches the v3 mockup
+ *  which has only one DXF export action). */
+function onExportClick() {
+  if (offsetResult.value) {
+    exportDxfWithOffset();
+  } else {
+    exportDxf();
+  }
+}
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const folderInput = ref<HTMLInputElement | null>(null);
@@ -133,9 +147,9 @@ const titleParts = computed(() => {
         フォルダ
         <span class="kbd">📁</span>
       </button>
-      <button class="btn primary" @click="exportDxf" :disabled="!currentFile">
+      <button class="btn primary" @click="onExportClick" :disabled="!currentFile">
         <svg><use href="#i-output" /></svg>
-        DXF を書き出す
+        {{ offsetResult ? 'DXF を書き出す (加工代込)' : 'DXF を書き出す' }}
       </button>
       <div class="user-chip">YT</div>
     </div>

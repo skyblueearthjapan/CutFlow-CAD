@@ -20,10 +20,14 @@
 import { computed, ref, shallowRef } from 'vue';
 import * as api from '../services/api';
 import type {
+  CornerJoin,
   DeleteCategoryKey,
   DeleteCategoryRow,
   Entity,
   FileData,
+  OffsetRequest,
+  OffsetResult,
+  OuterDetectionResult,
   Session,
 } from '../types/dxf';
 import { useActiveTool } from './activeTool';
@@ -38,6 +42,20 @@ const _isLoadingFile = ref(false);
 const _isDeleting = ref(false);
 const _lastError = ref<string | null>(null);
 const _isLiveBackend = ref<boolean | null>(null);
+
+/* ------------------- Phase 2 — outer/offset shared state ------------------ */
+/** Per-file outer-detection results, keyed by file_id. */
+const _outerByFile = shallowRef<Map<string, OuterDetectionResult>>(new Map());
+/** Per-file offset results, keyed by file_id. */
+const _offsetByFile = shallowRef<Map<string, OffsetResult>>(new Map());
+/** Per-file manual-selection state (entity ids in click order). */
+const _manualByFile = shallowRef<Map<string, string[]>>(new Map());
+const _isDetectingOuter = ref(false);
+const _isComputingOffset = ref(false);
+const _manualMode = ref(false);
+const _defaultOffsetMm = ref<number>(3.0);
+const _edgeOverrides = ref<Record<string, number>>({});
+const _cornerJoin = ref<CornerJoin>('arc');
 /**
  * File-picker openers registered by Header.vue on mount (M4). TabBar and any
  * other component that needs to trigger the upload UI calls these instead of
@@ -127,6 +145,35 @@ const remainingAfterDelete = computed(() => {
   return visibleEntities.value.length - _selectedForDelete.value.size;
 });
 
+/** Outer-detection result for the active file (null until detected). */
+const outerDetection = computed<OuterDetectionResult | null>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return null;
+  return _outerByFile.value.get(fid) ?? null;
+});
+
+/** Offset-preview result for the active file (null until computed). */
+const offsetResult = computed<OffsetResult | null>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return null;
+  return _offsetByFile.value.get(fid) ?? null;
+});
+
+/** Ordered list of entity ids the user has chained for manual selection. */
+const manualSelection = computed<string[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _manualByFile.value.get(fid) ?? [];
+});
+
+/** Set of outer entity ids (manual chain takes precedence over detection). */
+const outerEntityIdSet = computed<Set<string>>(() => {
+  if (_manualMode.value && manualSelection.value.length > 0) {
+    return new Set(manualSelection.value);
+  }
+  return new Set(outerDetection.value?.outer_loop ?? []);
+});
+
 /* ----------------------------- Helpers ---------------------------------- */
 
 function setError(msg: string | null) {
@@ -209,25 +256,39 @@ export function useSession() {
     _folderPickerOpener.value?.();
   }
 
-  /** Switch the active tab — fetches the file on first visit. */
+  /** Switch the active tab — fetches the file on first visit.
+   *  Phase 2: manual-selection mode is per-session UX (not per-file), so the
+   *  toggle is reset on every tab switch to avoid surprising clicks on a
+   *  fresh file. Per-file outer/offset/manual maps survive the switch. */
   async function selectFile(fid: string): Promise<void> {
     _currentFileId.value = fid;
     _selectedForDelete.value = new Set();
+    _manualMode.value = false;
     if (!_files.value.has(fid)) await loadFile(fid);
   }
 
-  /** Force-fetch (or re-fetch) the parsed entity payload for a file. */
+  /** Force-fetch (or re-fetch) the parsed entity payload for a file.
+   *
+   *  Also rehydrates the persisted outer / offset payloads in parallel so
+   *  a tab visited after a refresh shows the previously confirmed state
+   *  without forcing the user to re-detect (M3). */
   async function loadFile(fid: string): Promise<void> {
     const sid = _currentSession.value?.session_id;
     if (!sid) return;
     setError(null);
     _isLoadingFile.value = true;
     try {
-      const data = await api.getFile(sid, fid);
+      const [data, outer, offset] = await Promise.all([
+        api.getFile(sid, fid),
+        api.getOuter(sid, fid).catch(() => null),
+        api.getOffset(sid, fid).catch(() => null),
+      ]);
       // shallowRef requires assigning a new Map ref to trigger updates.
       const next = new Map(_files.value);
       next.set(fid, data);
       _files.value = next;
+      if (outer) setMapEntry(_outerByFile, fid, outer);
+      if (offset) setMapEntry(_offsetByFile, fid, offset);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'ファイルの読み込みに失敗しました');
     } finally {
@@ -278,6 +339,8 @@ export function useSession() {
     _isDeleting.value = true;
     try {
       await api.deleteEntities(sid, fid, ids);
+      // H11: any cached offset is stale once the geometry changes.
+      setMapEntry(_offsetByFile, fid, undefined);
       await loadFile(fid);
       _selectedForDelete.value = new Set();
     } catch (err) {
@@ -287,8 +350,17 @@ export function useSession() {
     }
   }
 
-  /** Download the cleaned DXF for the active file. */
+  /** Download the cleaned DXF for the active file (no offset). */
   async function exportDxf(): Promise<void> {
+    await exportDxfInternal(false);
+  }
+
+  /** Download the cleaned DXF with the computed offset embedded. */
+  async function exportDxfWithOffset(): Promise<void> {
+    await exportDxfInternal(true);
+  }
+
+  async function exportDxfInternal(withOffset: boolean): Promise<void> {
     const sid = _currentSession.value?.session_id;
     const fid = _currentFileId.value;
     const file = currentFile.value;
@@ -298,12 +370,179 @@ export function useSession() {
     }
     setError(null);
     try {
-      const blob = await api.exportDxf(sid, fid);
+      const blob = await api.exportDxf(sid, fid, withOffset);
       const base = file.name.replace(/\.[Dd][Xx][Ff]$/, '');
-      downloadBlob(blob, `${base}_clean.dxf`);
+      const suffix = withOffset ? '_offset' : '_clean';
+      downloadBlob(blob, `${base}${suffix}.dxf`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '書き出しに失敗しました');
     }
+  }
+
+  /* -------------------- Phase 2 — outer / offset actions ----------------- */
+
+  /** Mutate a shallowRef Map by cloning so subscribers re-render. */
+  function setMapEntry<V>(
+    map: { value: Map<string, V> },
+    key: string,
+    value: V | undefined,
+  ): void {
+    const next = new Map(map.value);
+    if (value === undefined) next.delete(key);
+    else next.set(key, value);
+    map.value = next;
+  }
+
+  /** Run the automatic outer-detection for the active file. */
+  async function detectOuter(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) {
+      setError('開いているDXFがありません');
+      return;
+    }
+    setError(null);
+    _isDetectingOuter.value = true;
+    try {
+      const res = await api.detectOuter(sid, fid);
+      setMapEntry(_outerByFile, fid, res);
+      // H11: outer changed → offset cache is stale.
+      setMapEntry(_offsetByFile, fid, undefined);
+      // Successful auto detection drops any in-progress manual chain.
+      if (res.status === 'success') {
+        setMapEntry(_manualByFile, fid, []);
+        _manualMode.value = false;
+      }
+      if (res.status === 'failed' || res.status === 'low_confidence') {
+        setError(
+          res.warnings[0] ??
+            '外径の自動検出に失敗しました。線を手動で指定してください。',
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '外径検出に失敗しました');
+    } finally {
+      _isDetectingOuter.value = false;
+    }
+  }
+
+  /** Toggle manual-selection mode (entity clicks chain ids while ON). */
+  function setManualMode(on: boolean): void {
+    _manualMode.value = on;
+  }
+
+  /** Append (or remove, when already last) an entity id to the manual chain. */
+  function addToManual(entityId: string): void {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    const cur = _manualByFile.value.get(fid) ?? [];
+    // Click on the last-added id: pop it (undo). Click on any other already-
+    // selected id: ignore (no duplicates in a chain).
+    if (cur.length > 0 && cur[cur.length - 1] === entityId) {
+      setMapEntry(_manualByFile, fid, cur.slice(0, -1));
+      return;
+    }
+    if (cur.includes(entityId)) return;
+    setMapEntry(_manualByFile, fid, [...cur, entityId]);
+  }
+
+  /** Drop the entire manual chain for the active file. */
+  function clearManual(): void {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    setMapEntry(_manualByFile, fid, []);
+  }
+
+  /** Send the manual chain to the backend for closure + summary. */
+  async function confirmManual(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    const ids = _manualByFile.value.get(fid) ?? [];
+    if (ids.length === 0) {
+      setError('手動選択された線がありません');
+      return;
+    }
+    setError(null);
+    _isDetectingOuter.value = true;
+    try {
+      const res = await api.confirmOuterManual(sid, fid, ids);
+      setMapEntry(_outerByFile, fid, res);
+      _manualMode.value = false;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '閉ループになっていません');
+    } finally {
+      _isDetectingOuter.value = false;
+    }
+  }
+
+  /** Recompute the offset preview using the current default + overrides.
+   *
+   *  Uses an AbortController per request (M5): when a new computation is
+   *  scheduled while an old one is still in flight (e.g. user spams the
+   *  ± buttons), the previous request is cancelled so its (now stale)
+   *  result cannot overwrite a fresher one. */
+  let _offsetAbort: AbortController | null = null;
+  async function computeOffset(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) {
+      setError('開いているDXFがありません');
+      return;
+    }
+    setError(null);
+    _isComputingOffset.value = true;
+    if (_offsetAbort) _offsetAbort.abort();
+    const ctrl = new AbortController();
+    _offsetAbort = ctrl;
+    try {
+      const req: OffsetRequest = {
+        default_mm: _defaultOffsetMm.value,
+        edge_overrides: { ..._edgeOverrides.value },
+        corner_join: _cornerJoin.value,
+      };
+      const res = await api.computeOffset(sid, fid, req, ctrl.signal);
+      // Bail out if a newer request superseded us mid-flight.
+      if (ctrl.signal.aborted) return;
+      setMapEntry(_offsetByFile, fid, res);
+    } catch (err) {
+      // AbortError is expected when we cancel — don't surface it.
+      if ((err as { name?: string } | null)?.name === 'AbortError') return;
+      setError(err instanceof Error ? err.message : '加工代の計算に失敗しました');
+    } finally {
+      if (_offsetAbort === ctrl) _offsetAbort = null;
+      _isComputingOffset.value = false;
+    }
+  }
+
+  function setDefaultOffset(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    // Clamp to a sensible range — backend will validate too but a UI guard
+    // prevents accidental negative/giant values during num-step interaction.
+    const clamped = Math.max(0, Math.min(50, Number(mm.toFixed(2))));
+    _defaultOffsetMm.value = clamped;
+  }
+
+  /** Apply a per-edge offset override.
+   *
+   *  ``edgeLabel`` is the 1-based loop traversal label (``E1``..``En``,
+   *  or the composite ``E1#k`` form for closed-polyline segments) — this
+   *  matches the backend's ``edge_overrides`` dict shape exactly (C1). */
+  function setEdgeOverride(edgeLabel: string, mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    const clamped = Math.max(0, Math.min(50, Number(mm.toFixed(2))));
+    _edgeOverrides.value = { ..._edgeOverrides.value, [edgeLabel]: clamped };
+  }
+
+  function clearEdgeOverride(edgeLabel: string): void {
+    if (!(edgeLabel in _edgeOverrides.value)) return;
+    const next = { ..._edgeOverrides.value };
+    delete next[edgeLabel];
+    _edgeOverrides.value = next;
+  }
+
+  function setCornerJoin(join: CornerJoin): void {
+    _cornerJoin.value = join;
   }
 
   return {
@@ -319,10 +558,21 @@ export function useSession() {
     isDeleting: _isDeleting,
     lastError: _lastError,
     isLiveBackend: _isLiveBackend,
+    // Phase 2 state
+    isDetectingOuter: _isDetectingOuter,
+    isComputingOffset: _isComputingOffset,
+    manualMode: _manualMode,
+    defaultOffsetMm: _defaultOffsetMm,
+    edgeOverrides: _edgeOverrides,
+    cornerJoin: _cornerJoin,
     // derived
     deleteRows,
     totalDeleteCandidates,
     remainingAfterDelete,
+    outerDetection,
+    offsetResult,
+    manualSelection,
+    outerEntityIdSet,
     // actions
     uploadFiles,
     selectFile,
@@ -333,6 +583,18 @@ export function useSession() {
     clearSelection,
     executeDelete,
     exportDxf,
+    exportDxfWithOffset,
+    // Phase 2 actions
+    detectOuter,
+    setManualMode,
+    addToManual,
+    clearManual,
+    confirmManual,
+    computeOffset,
+    setDefaultOffset,
+    setEdgeOverride,
+    clearEdgeOverride,
+    setCornerJoin,
     clearError: () => setError(null),
     // picker plumbing (M4)
     registerFilePicker,

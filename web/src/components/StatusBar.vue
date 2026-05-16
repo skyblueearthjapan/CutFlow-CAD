@@ -13,6 +13,7 @@ const {
   selectedForDelete,
   totalDeleteCandidates,
   remainingAfterDelete,
+  outerDetection,
   isLiveBackend,
 } = useSession();
 
@@ -21,12 +22,20 @@ const backendLabel = computed(() => {
   if (isLiveBackend.value === null) return 'idle';
   return isLiveBackend.value ? 'live' : 'mock';
 });
+
+/** Outer-detection confidence as a percentage, or "--" when not run yet. */
+const outerPct = computed(() => {
+  const d = outerDetection.value;
+  if (!d) return '--';
+  return `${Math.round(d.confidence * 100)}%`;
+});
 </script>
 
 <template>
   <div class="status">
     <div class="status-left">
       <template v-if="live">
+        <span class="status-item"><span class="dot"></span>外径検出 <b>{{ outerPct }}</b></span>
         <span class="status-item"><span class="dot am"></span>削除候補 <b>{{ totalDeleteCandidates }}</b></span>
         <span class="status-item">選択中 <b>{{ selectedForDelete.size }}</b></span>
         <span class="status-item">エンティティ <b>{{ currentFile!.entities.length }} → {{ remainingAfterDelete }}</b></span>

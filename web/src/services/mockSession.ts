@@ -11,10 +11,14 @@
  */
 
 import type {
+  BoundingBox,
   DeleteCandidates,
   DeleteResult,
   Entity,
   FileData,
+  OffsetRequest,
+  OffsetResult,
+  OuterDetectionResult,
   Session,
   SessionFile,
 } from '../types/dxf';
@@ -275,7 +279,11 @@ export async function mockDeleteEntities(
   return { deleted_count: file.deleted_ids.length, remaining };
 }
 
-export async function mockExportDxf(sid: string, fid: string): Promise<Blob> {
+export async function mockExportDxf(
+  sid: string,
+  fid: string,
+  withOffset = false,
+): Promise<Blob> {
   const bundle = _store.get(sid);
   if (!bundle) throw new Error(`mock: unknown session ${sid}`);
   const file = bundle.files.get(fid);
@@ -299,10 +307,198 @@ export async function mockExportDxf(sid: string, fid: string): Promise<Blob> {
     '2',
     'ENTITIES',
     `999  mock export — ${file.entities.length - (file.deleted_ids?.length ?? 0)} entities`,
+    `999  with_offset=${withOffset ? 'true' : 'false'}`,
     '0',
     'ENDSEC',
     '0',
     'EOF',
   ];
   return new Blob([lines.join('\n')], { type: 'application/dxf' });
+}
+
+/* -------------------- Phase 2: outer detection / offset ------------------- */
+
+/** Locate the file in the mock store or throw the same "unknown" error
+ *  shape the other mock endpoints use. */
+function locateFile(sid: string, fid: string): FileData {
+  const bundle = _store.get(sid);
+  if (!bundle) throw new Error(`mock: unknown session ${sid}`);
+  const file = bundle.files.get(fid);
+  if (!file) throw new Error(`mock: unknown file ${fid}`);
+  return file;
+}
+
+/** Build a LoopSummary from a list of outer entity ids. */
+function summariseLoop(
+  file: FileData,
+  ids: string[],
+): OuterDetectionResult['loop_summary'] {
+  const map = new Map(file.entities.map((e) => [e.id, e]));
+  let lines = 0;
+  let arcs = 0;
+  let perimeter = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const grow = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  };
+  for (const id of ids) {
+    const e = map.get(id);
+    if (!e) continue;
+    if (e.type === 'LINE') {
+      lines += 1;
+      const x1 = +e.geom?.x1 || 0, y1 = +e.geom?.y1 || 0;
+      const x2 = +e.geom?.x2 || 0, y2 = +e.geom?.y2 || 0;
+      perimeter += Math.hypot(x2 - x1, y2 - y1);
+      grow(x1, y1); grow(x2, y2);
+    } else if (e.type === 'ARC') {
+      arcs += 1;
+      const r = +e.geom?.r || 0;
+      const a1 = +e.geom?.start_angle || 0;
+      const a2 = +e.geom?.end_angle || 0;
+      let sweep = a2 - a1;
+      while (sweep < 0) sweep += 360;
+      perimeter += (Math.PI * r * sweep) / 180;
+      const cx = +e.geom?.cx || 0, cy = +e.geom?.cy || 0;
+      grow(cx - r, cy - r); grow(cx + r, cy + r);
+    }
+  }
+  if (!Number.isFinite(minX)) {
+    // Fall back to the file bbox if no entities matched.
+    return {
+      closed: ids.length > 0,
+      segments: ids.length,
+      lines,
+      arcs,
+      perimeter,
+      area: 0,
+      bounding_box: file.bounding_box,
+    };
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  return {
+    closed: ids.length > 0,
+    segments: ids.length,
+    lines,
+    arcs,
+    perimeter,
+    // Synthetic area — for a rounded rectangle this is close enough for the
+    // inspector display. The real value is computed server-side.
+    area: w * h,
+    bounding_box: { min_x: minX, min_y: minY, max_x: maxX, max_y: maxY },
+  };
+}
+
+export async function mockDetectOuter(
+  sid: string,
+  fid: string,
+): Promise<OuterDetectionResult> {
+  await new Promise((r) => setTimeout(r, 180));
+  const file = locateFile(sid, fid);
+  // The sample data builds entities with `category: 'outer'` for the rounded
+  // rectangle — use those ids as the detected loop. This produces a plausible
+  // success response for the UI without any geometry libraries.
+  const outerIds = file.entities.filter((e) => e.category === 'outer').map((e) => e.id);
+  if (outerIds.length === 0) {
+    return {
+      status: 'failed',
+      confidence: 0,
+      outer_loop: [],
+      loop_summary: {
+        closed: false,
+        segments: 0,
+        lines: 0,
+        arcs: 0,
+        perimeter: 0,
+        area: 0,
+        bounding_box: file.bounding_box,
+      },
+      warnings: ['外径候補となる閉ループが見つかりませんでした'],
+      candidates: [],
+    };
+  }
+  const summary = summariseLoop(file, outerIds);
+  return {
+    status: 'success',
+    confidence: 0.92,
+    outer_loop: outerIds,
+    loop_summary: summary,
+    warnings: [],
+    candidates: [
+      { loop: outerIds, confidence: 0.92, area: summary.area },
+    ],
+  };
+}
+
+export async function mockConfirmOuterManual(
+  sid: string,
+  fid: string,
+  entityIds: string[],
+): Promise<OuterDetectionResult> {
+  await new Promise((r) => setTimeout(r, 120));
+  const file = locateFile(sid, fid);
+  if (entityIds.length < 3) {
+    // Mirror the live backend's 422 "not closed" semantics with an Error
+    // (api.ts surfaces this via its ApiError flow in production).
+    throw new Error('手動選択は3本以上の線で閉ループになる必要があります');
+  }
+  const summary = summariseLoop(file, entityIds);
+  return {
+    status: 'success',
+    confidence: 1.0,
+    outer_loop: entityIds,
+    loop_summary: summary,
+    warnings: [],
+    candidates: [],
+  };
+}
+
+export async function mockComputeOffset(
+  sid: string,
+  fid: string,
+  req: OffsetRequest,
+): Promise<OffsetResult> {
+  await new Promise((r) => setTimeout(r, 200));
+  const file = locateFile(sid, fid);
+  const outerIds = file.entities.filter((e) => e.category === 'outer').map((e) => e.id);
+  const summary = summariseLoop(file, outerIds);
+  const base: BoundingBox = summary.bounding_box;
+  const w = base.max_x - base.min_x;
+  const h = base.max_y - base.min_y;
+  const d = req.default_mm;
+  // Per-edge overrides aren't truly modelled in the mock; we just expand the
+  // bounding box uniformly by the default offset for a reasonable preview.
+  const offsetBbox: BoundingBox = {
+    min_x: base.min_x - d,
+    min_y: base.min_y - d,
+    max_x: base.max_x + d,
+    max_y: base.max_y + d,
+  };
+  const ow = offsetBbox.max_x - offsetBbox.min_x;
+  const oh = offsetBbox.max_y - offsetBbox.min_y;
+  // Treat the offset loop as a simple rounded rectangle around the outer one.
+  // The renderer only needs vertices for the dashed preview; bulge=0 keeps
+  // it as straight LWPOLYLINE segments which is sufficient at this scale.
+  const vertices: [number, number, number][] = [
+    [offsetBbox.min_x, offsetBbox.min_y, 0],
+    [offsetBbox.max_x, offsetBbox.min_y, 0],
+    [offsetBbox.max_x, offsetBbox.max_y, 0],
+    [offsetBbox.min_x, offsetBbox.max_y, 0],
+  ];
+  const perimeter = 2 * (ow + oh);
+  // Material efficiency: original area / plate area (capped at 1.0).
+  const plateArea = ow * oh;
+  const originalArea = w * h;
+  const efficiency = plateArea > 0 ? Math.min(originalArea / plateArea, 1) : 0;
+  return {
+    offset_loop: { type: 'LWPOLYLINE', vertices, closed: true },
+    perimeter,
+    bounding_box: offsetBbox,
+    plate_size: `${Math.round(ow)} × ${Math.round(oh)} mm`,
+    material_efficiency: efficiency,
+    warnings: [],
+  };
 }

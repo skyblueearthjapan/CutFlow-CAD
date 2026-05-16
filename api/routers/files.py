@@ -1,17 +1,30 @@
-"""Per-file endpoints: parse, delete reservation, export."""
+"""Per-file endpoints: parse, delete reservation, outer detection, offset, export."""
 
 from __future__ import annotations
 
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
-from models import DeleteRequest, DeleteResponse, FileEntities
+from models import (
+    DeleteRequest,
+    DeleteResponse,
+    FileEntities,
+    OffsetRequest,
+    OffsetResult,
+    OuterDetectionResult,
+    OuterManualRequest,
+)
+from services import graph as gmod
 from services.dxf_parser import parse_file
 from services.dxf_writer import export_clean_dxf
+from services.offset import OffsetError, compute_offset
+from services.outer_detector import detect_outer, evaluate_manual
 from storage import SessionExpired, SessionNotFound, get_store
 
 log = logging.getLogger(__name__)
@@ -38,6 +51,32 @@ def _resolve(sid: str, fid: str):
         raise HTTPException(status_code=404, detail="file no longer available") from exc
 
 
+def _items_for_detection(payload: FileEntities) -> list[tuple[str, str, str, dict]]:
+    """Reduce a parsed payload to the (eid, type, category, geom) tuples the
+    detector consumes."""
+
+    return [(e.id, e.type, e.category, e.geom) for e in payload.entities]
+
+
+def _build_topo(payload: FileEntities, loop: list[str]) -> gmod.TopoGraph:
+    """Re-derive the topology graph for the offset stage from the live payload."""
+
+    edge_items: list[tuple[str, str, dict]] = []
+    for e in payload.entities:
+        if e.type not in {"LINE", "ARC", "LWPOLYLINE", "POLYLINE", "CIRCLE"}:
+            continue
+        edge_items.append((e.id, e.type, e.geom))
+    topo = gmod.build_graph(edge_items)
+    # Ensure every loop edge exists in the graph; if not, raise.
+    missing = [eid for eid in loop if eid not in topo.edges]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"外径ループに存在しないエンティティが含まれています: {missing[:5]}",
+        )
+    return topo
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -47,14 +86,26 @@ def _resolve(sid: str, fid: str):
 async def get_file_entities(sid: str, fid: str) -> FileEntities:
     """Parse the DXF and return JSON entities + delete candidates."""
 
-    _store, sf = _resolve(sid, fid)
+    store, sf = _resolve(sid, fid)
+    # Read the confirmed outer-loop first so the classifier never re-routes
+    # any of those entities into the FRAME bucket on re-parse (H1).
+    saved = store.read_outer(sid, fid)
+    outer_ids = list(saved.get("loop") or []) if saved else None
     try:
-        payload = parse_file(sf.path, file_id=fid, name=sf.name)
+        payload = parse_file(sf.path, file_id=fid, name=sf.name, outer_ids=outer_ids)
     except Exception as exc:  # noqa: BLE001 - DXF parsing has many failure modes
         log.exception("parse failed for %s", sf.path)
         raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
 
-    payload.deleted_ids = _store.get_deleted_for_file(sid, fid)
+    # Apply confirmed outer-loop category overlay if present so the frontend
+    # paints those entities in cyan immediately.
+    if saved and saved.get("loop"):
+        loop_ids = set(saved["loop"])
+        for e in payload.entities:
+            if e.id in loop_ids:
+                e.category = "outer"
+
+    payload.deleted_ids = store.get_deleted_for_file(sid, fid)
     return payload
 
 
@@ -85,13 +136,192 @@ async def post_delete(sid: str, fid: str, body: DeleteRequest) -> DeleteResponse
                  len(dropped), sid, fid, sorted(dropped)[:10])
 
     merged = store.update_deleted(sid, fid, filtered)
+    # H11: any cached offset is now stale (the geometry it was computed
+    # against has changed). Force a recompute on the next call.
+    store.invalidate_offset(sid, fid)
     remaining = max(payload.stats.total - len(merged), 0)
     return DeleteResponse(deleted_count=len(merged), remaining=remaining)
 
 
+@router.post("/detect-outer", response_model=OuterDetectionResult)
+async def post_detect_outer(sid: str, fid: str) -> OuterDetectionResult:
+    """Run the STEP 1–5 outer-loop detection pipeline.
+
+    Persists the winning loop to ``state/{fid}/outer.json`` so subsequent
+    offset / export calls can reuse it without re-running the heuristics.
+    """
+
+    store, sf = _resolve(sid, fid)
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    try:
+        # H7: honour delete reservations so the detector never picks an
+        # entity the user has already flagged for removal.
+        deleted = store.get_deleted_for_file(sid, fid)
+        result = detect_outer(_items_for_detection(payload), delete_ids=deleted)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("detect_outer failed for %s/%s", sid, fid)
+        raise HTTPException(status_code=500, detail=f"detection failed: {exc}") from exc
+
+    # Persist a small payload for downstream callers (offset / export).
+    summary = result.get("loop_summary") or {}
+    store.write_outer(
+        sid,
+        fid,
+        {
+            "loop": list(result.get("outer_loop") or []),
+            "confidence": float(result.get("confidence") or 0.0),
+            "method": result.get("method", ""),
+            "perimeter": float(summary.get("perimeter") or 0.0),
+            "area": float(summary.get("area") or 0.0),
+            "status": result.get("status", "failed"),
+        },
+    )
+    # H11: invalidate any cached offset — the outer it was computed
+    # against has just been replaced.
+    store.invalidate_offset(sid, fid)
+    return OuterDetectionResult(**result)
+
+
+@router.post("/outer-manual", response_model=OuterDetectionResult)
+async def post_outer_manual(
+    sid: str, fid: str, body: OuterManualRequest
+) -> OuterDetectionResult:
+    """Validate a manually-selected entity chain and persist if it closes."""
+
+    if not body.entity_ids:
+        raise HTTPException(status_code=400, detail="entity_ids が空です")
+
+    store, sf = _resolve(sid, fid)
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    result = evaluate_manual(_items_for_detection(payload), body.entity_ids)
+
+    # Only persist on success — a failed manual attempt should not clobber
+    # an existing confirmed loop.
+    if result.get("status") == "success":
+        summary = result.get("loop_summary") or {}
+        store.write_outer(
+            sid,
+            fid,
+            {
+                "loop": list(result.get("outer_loop") or []),
+                "confidence": float(result.get("confidence") or 1.0),
+                "method": "manual",
+                "perimeter": float(summary.get("perimeter") or 0.0),
+                "area": float(summary.get("area") or 0.0),
+                "status": "success",
+            },
+        )
+        # H11: invalidate cached offset on outer change.
+        store.invalidate_offset(sid, fid)
+        return OuterDetectionResult(**result)
+
+    # Manual selection that doesn't close → 422 with the warnings attached.
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "manual outer loop is not closed",
+            "warnings": result.get("warnings") or [],
+        },
+    )
+
+
+@router.post("/offset", response_model=OffsetResult)
+async def post_offset(sid: str, fid: str, body: OffsetRequest) -> OffsetResult:
+    """Compute the outer-offset polygon for the confirmed outer loop."""
+
+    store, sf = _resolve(sid, fid)
+    saved = store.read_outer(sid, fid)
+    if not saved or not saved.get("loop"):
+        raise HTTPException(
+            status_code=422,
+            detail="先に外径を確定してください (detect-outer / outer-manual)",
+        )
+    # H6: never offset an unconfirmed outer (low_confidence / failed). The
+    # UI must walk the user through manual confirmation first to avoid
+    # silently shipping the wrong polygon downstream.
+    saved_status = saved.get("status") or ""
+    if saved_status not in {"success", ""}:
+        raise HTTPException(
+            status_code=409,
+            detail="外径が未確定です。先に外径を確定 (信頼度 success / 手動) してから加工代を計算してください",
+        )
+
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name, outer_ids=list(saved.get("loop") or []))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    loop_ids: list[str] = list(saved["loop"])
+    topo = _build_topo(payload, loop_ids)
+
+    try:
+        result = compute_offset(
+            topo,
+            loop_ids,
+            default_mm=body.default_mm,
+            edge_overrides=body.edge_overrides,
+            corner_join=body.corner_join,
+        )
+    except OffsetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.exception("offset failed for %s/%s", sid, fid)
+        raise HTTPException(status_code=500, detail=f"offset failed: {exc}") from exc
+
+    store.write_offset(sid, fid, {"request": body.model_dump(), "result": result})
+    return OffsetResult(**result)
+
+
+@router.get("/outer")
+async def get_outer(sid: str, fid: str) -> dict:
+    """Return the persisted outer-loop result (or 404 if not detected yet).
+
+    Used by the frontend to rehydrate Phase 2 state when a tab is opened
+    after a refresh (M3).
+    """
+
+    store, _sf = _resolve(sid, fid)
+    saved = store.read_outer(sid, fid)
+    if not saved:
+        raise HTTPException(status_code=404, detail="外径未検出")
+    return saved
+
+
+@router.get("/offset")
+async def get_offset(sid: str, fid: str) -> dict:
+    """Return the persisted offset payload (or 404 if not computed yet)."""
+
+    store, _sf = _resolve(sid, fid)
+    saved = store.read_offset(sid, fid)
+    if not saved:
+        raise HTTPException(status_code=404, detail="加工代未計算")
+    return saved
+
+
 @router.get("/export")
-async def export(sid: str, fid: str, format: str = "dxf") -> FileResponse:
-    """Stream the cleaned DXF back to the browser as ``<name>_clean.dxf``."""
+async def export(
+    sid: str,
+    fid: str,
+    format: str = "dxf",
+    with_offset: bool = Query(False),
+) -> FileResponse:
+    """Stream the cleaned DXF back to the browser as ``<name>_clean.dxf``.
+
+    When ``with_offset=true`` and an offset polygon has been computed for
+    the file, the offset LWPOLYLINE is appended on the ``CUTFLOW_OFFSET``
+    layer so downstream CAM tools can pick it up immediately.
+    """
 
     if format != "dxf":
         raise HTTPException(status_code=400, detail="only format=dxf is supported in Phase 1")
@@ -99,17 +329,40 @@ async def export(sid: str, fid: str, format: str = "dxf") -> FileResponse:
     store, sf = _resolve(sid, fid)
     deleted = set(store.get_deleted_for_file(sid, fid))
 
+    extra: list[dict] | None = None
+    if with_offset:
+        saved_offset = store.read_offset(sid, fid)
+        if not saved_offset or not saved_offset.get("result"):
+            raise HTTPException(
+                status_code=422,
+                detail="加工代がまだ計算されていません (先に POST /offset を呼んでください)",
+            )
+        loop = saved_offset["result"].get("offset_loop") or {}
+        verts = loop.get("vertices") or []
+        if verts:
+            extra = [{
+                "vertices": verts,
+                "closed": bool(loop.get("closed", True)),
+                "layer": "CUTFLOW_OFFSET",
+                "color": 4,
+            }]
+
     out_dir = Path(tempfile.mkdtemp(prefix="cutflow-export-"))
     base = Path(sf.name).stem
-    dest = out_dir / f"{base}_clean.dxf"
+    suffix = "_clean_offset" if with_offset else "_clean"
+    dest = out_dir / f"{base}{suffix}.dxf"
     try:
-        export_clean_dxf(sf.path, deleted, dest)
+        export_clean_dxf(sf.path, deleted, dest, extra_polylines=extra)
     except Exception as exc:  # noqa: BLE001
         log.exception("export failed for %s", sf.path)
         raise HTTPException(status_code=500, detail=f"export failed: {exc}") from exc
 
+    # M6: clean up the per-request tempdir after FastAPI finishes streaming
+    # the file back to the client. Without this every export leaks ~10–50KB
+    # of temp space on the host.
     return FileResponse(
         path=str(dest),
-        filename=f"{base}_clean.dxf",
+        filename=f"{base}{suffix}.dxf",
         media_type="application/dxf",
+        background=BackgroundTask(shutil.rmtree, str(out_dir), ignore_errors=True),
     )

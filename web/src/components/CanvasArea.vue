@@ -28,6 +28,12 @@ const {
   lastError,
   remainingAfterDelete,
   isLoadingFile,
+  // Phase 2
+  outerEntityIdSet,
+  offsetResult,
+  manualMode,
+  manualSelection,
+  addToManual,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -102,21 +108,60 @@ const bannerText = computed(() =>
 );
 const bannerTitle = computed(() => (lastError.value ? 'エラー' : '注意'));
 
-/** Canvas-level click handler — propagates entity hits to the store. */
+/** Canvas-level click handler — propagates entity hits to the store.
+ *  - delete mode: toggles the entity in/out of the delete selection.
+ *  - outer mode + manual chain mode: appends the entity to the manual chain
+ *    (clicking the most-recent entity again pops it for one-step undo). */
 function onCanvasClick(e: MouseEvent) {
-  if (activeTool.value !== 'delete') return;
+  if (activeTool.value !== 'delete' && !(activeTool.value === 'outer' && manualMode.value)) {
+    return;
+  }
   // Walk up from the click target to find the nearest element carrying a
   // data-entity-id attribute (the EntityRenderer puts it on the SVG element).
   let el: SVGElement | null = e.target as SVGElement;
   while (el && el instanceof SVGElement) {
     const id = el.getAttribute('data-entity-id');
     if (id) {
-      selectEntity(id);
+      if (activeTool.value === 'delete') {
+        selectEntity(id);
+      } else {
+        addToManual(id);
+      }
       return;
     }
     el = el.parentNode as SVGElement | null;
   }
 }
+
+/* -------------------- Phase 2 — outer / offset overlay ------------------- */
+
+/** Set of ids currently selected via the manual chain — used by the renderer
+ *  to apply the `.is-manual` highlight class. */
+const manualSelectionSet = computed<Set<string>>(
+  () => new Set(manualSelection.value),
+);
+
+/** SVG path `d` for the offset preview loop. The backend returns
+ *  `[x, y, bulge]` triples; for the preview we draw bulge=0 segments only
+ *  (full bulge handling lives in EntityRenderer for actual entities). */
+const offsetPreviewPath = computed<string>(() => {
+  const r = offsetResult.value;
+  if (!r) return '';
+  const verts = r.offset_loop.vertices;
+  if (!verts || verts.length === 0) return '';
+  let d = `M ${verts[0][0]} ${verts[0][1]}`;
+  for (let i = 1; i < verts.length; i++) {
+    d += ` L ${verts[i][0]} ${verts[i][1]}`;
+  }
+  if (r.offset_loop.closed) d += ' Z';
+  return d;
+});
+
+/** Show the offset preview overlay only when in offset mode and we have a
+ *  computed loop (avoids a stale preview leaking into other tools). */
+const showOffsetPreview = computed(
+  () => activeTool.value === 'offset' && !!offsetPreviewPath.value,
+);
 
 /** "Fit" button — for now just resets to the bounding-box viewBox (no zoom
  *  state to clear yet). Kept as a stub so the button is wired and visible. */
@@ -170,8 +215,19 @@ function onFit() {
             :key="ent.id"
             :entity="ent"
             :selected="selectedForDelete.has(ent.id)"
+            :is-outer="outerEntityIdSet.has(ent.id)"
+            :is-manual="manualSelectionSet.has(ent.id)"
             :flip-y-base="flipYBase"
           />
+
+          <!-- Offset preview: dashed cyan loop drawn outside the outer.
+               `class="ent offset"` reuses the v3 dashed style (4dcfe0,
+               stroke-dasharray 5 4); the fill rectangle uses .offset-fill
+               so the body[data-mode="offset"] CSS keeps it subtle. -->
+          <template v-if="showOffsetPreview">
+            <path class="offset-fill" :d="offsetPreviewPath" />
+            <path class="ent offset" :d="offsetPreviewPath" />
+          </template>
         </g>
       </template>
 

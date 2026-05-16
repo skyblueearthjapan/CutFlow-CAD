@@ -14,9 +14,20 @@ if str(_API_DIR) not in sys.path:
     sys.path.insert(0, str(_API_DIR))
 
 
-# Three representative sample drawings selected by the spec.
-SAMPLE_DIR = Path(
+# Three representative sample drawings selected by the spec. The path is
+# overridable through ``CUTFLOW_SAMPLES_DIR`` so CI environments can ship
+# their own fixtures without editing this file (H3). A repo-local default
+# at ``api/tests/fixtures/samples/`` is checked first so contributors only
+# need to drop the DXFs in once.
+_LOCAL_DEFAULT = Path(__file__).parent / "fixtures" / "samples"
+_LEGACY_DEFAULT = Path(
     r"C:/Users/imaizumi.LINEWORKS-NET/Desktop/コベルコブームRBシステム/P1_昇降軸/昇降軸"
+)
+SAMPLE_DIR = Path(
+    os.environ.get(
+        "CUTFLOW_SAMPLES_DIR",
+        str(_LOCAL_DEFAULT if _LOCAL_DEFAULT.exists() else _LEGACY_DEFAULT),
+    )
 )
 SAMPLE_FILES = {
     "small": "25057-P1-06_カラー.DXF",

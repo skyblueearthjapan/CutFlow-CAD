@@ -24,16 +24,33 @@ import { computed } from 'vue';
 import type { Entity } from '../types/dxf';
 import { categoryClass } from '../stores/session';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   entity: Entity;
   selected: boolean;
+  /** Phase 2 — entity is part of the detected outer loop (cyan glow). */
+  isOuter?: boolean;
+  /** Phase 2 — entity is part of the in-progress manual chain (blue). */
+  isManual?: boolean;
   /** Optional: not used for TEXT (per-text local flip is self-contained). */
   flipYBase?: number;
-}>();
+}>(), {
+  isOuter: false,
+  isManual: false,
+});
 
 const cls = computed(() => {
-  const base = categoryClass(props.entity);
-  return props.selected ? `${base} is-selected` : base;
+  // The base classification might tag an entity as `ent` (e.g. `category:
+  // 'other'`); when outer detection elevates it to "this is part of the
+  // outer loop", override the visual to `ent outer` so v3's
+  // body[data-mode="outer"] .ent.outer rule kicks in (stroke-width 2.4 +
+  // glow). The manual chain takes precedence so the user sees their click
+  // sequence in blue.
+  let base = categoryClass(props.entity);
+  if (props.isOuter && !base.includes('outer')) base = 'ent outer';
+  const extras: string[] = [];
+  if (props.isManual) extras.push('is-manual');
+  if (props.selected) extras.push('is-selected');
+  return extras.length ? `${base} ${extras.join(' ')}` : base;
 });
 
 /** Safe number coercion — returns `fallback` for null/undefined/NaN. */
@@ -295,6 +312,21 @@ function textTransform(y: number): string {
   filter: drop-shadow(0 0 4px rgba(106, 163, 255, 0.7));
 }
 :deep(.is-selected) :is(line, circle, path, ellipse, polygon) {
+  stroke: #6aa3ff !important;
+}
+
+/* Manual-chain highlight for outer mode: also blue, slightly stronger glow
+   so the user can distinguish "this is what I am building" from delete
+   selection at a glance. Stacks before .is-selected so delete mode can
+   still take over if the user re-enters it. */
+:deep(.is-manual),
+.is-manual {
+  stroke: #6aa3ff !important;
+  stroke-width: 2.6 !important;
+  opacity: 1 !important;
+  filter: drop-shadow(0 0 6px rgba(106, 163, 255, 0.85));
+}
+:deep(.is-manual) :is(line, circle, path, ellipse, polygon) {
   stroke: #6aa3ff !important;
 }
 </style>

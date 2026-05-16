@@ -108,3 +108,96 @@ class DeleteRequest(BaseModel):
 class DeleteResponse(BaseModel):
     deleted_count: int
     remaining: int
+
+
+# ---------------------------------------------------------------------------
+# Outer-detection / offset payloads (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+OuterStatus = Literal["success", "low_confidence", "failed"]
+
+
+class OuterLoopSummary(BaseModel):
+    """Geometric summary of an outer-loop candidate."""
+
+    closed: bool
+    segments: int
+    lines: int
+    arcs: int
+    perimeter: float
+    area: float
+    bounding_box: BoundingBox
+
+
+class OuterCandidate(BaseModel):
+    """Single outer-loop candidate (the runner-ups surfaced to the UI)."""
+
+    loop: list[str] = Field(default_factory=list)
+    confidence: float
+    area: float
+    method: str = "graph"
+
+
+class OuterDetectionResult(BaseModel):
+    """Outer-shape detection response.
+
+    ``status`` collapses confidence into one of:
+
+    * ``success``         — c >= 0.80, frontend can auto-confirm
+    * ``low_confidence``  — 0.50 <= c < 0.80, frontend nudges the user
+    * ``failed``          — c < 0.50, frontend forces manual selection
+    """
+
+    status: OuterStatus
+    confidence: float
+    method: str = ""
+    outer_loop: list[str] = Field(default_factory=list)
+    loop_summary: OuterLoopSummary | None = None
+    warnings: list[str] = Field(default_factory=list)
+    candidates: list[OuterCandidate] = Field(default_factory=list)
+
+
+class OuterManualRequest(BaseModel):
+    """User-supplied entity-id chain claimed to form the outer loop."""
+
+    entity_ids: list[str] = Field(default_factory=list)
+
+
+class OffsetVertex(BaseModel):
+    """LWPOLYLINE vertex with optional bulge."""
+
+    x: float
+    y: float
+    bulge: float = 0.0
+
+
+class OffsetLoop(BaseModel):
+    """Result polyline of an outer-offset computation."""
+
+    type: Literal["LWPOLYLINE"] = "LWPOLYLINE"
+    vertices: list[list[float]] = Field(default_factory=list)
+    closed: bool = True
+
+
+class OffsetRequest(BaseModel):
+    """Outer-offset (加工代) request body.
+
+    ``edge_overrides`` keys are 1-based edge labels (``"E1"`` .. ``"En"``) in
+    loop traversal order — they add ON TOP of ``default_mm`` rather than
+    replacing it (matches the spec's "simple per-edge additive" decision).
+    """
+
+    default_mm: float = Field(3.0, ge=0.0, le=200.0)
+    edge_overrides: dict[str, float] = Field(default_factory=dict)
+    corner_join: Literal["arc", "miter"] = "arc"
+
+
+class OffsetResult(BaseModel):
+    offset_loop: OffsetLoop
+    perimeter: float
+    area: float
+    bounding_box: BoundingBox
+    plate_size: str  # e.g. "446 × 286 mm"
+    material_efficiency: float
+    warnings: list[str] = Field(default_factory=list)

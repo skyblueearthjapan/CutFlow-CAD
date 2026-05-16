@@ -48,11 +48,16 @@ _BALLOON_TEXT_RE = re.compile(r"^[\s\(]*(\d{1,3})[\s\)]*$")
 def classify_entities(
     entities: Iterable[tuple[str, DXFEntity, dict[str, Any]]],
     doc: Drawing,
+    outer_ids: Iterable[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Return ``(category_by_id, delete_candidates)``.
 
     ``entities`` is an iterable of ``(entity_id, dxf_entity, geom_dict)`` as
     produced by :func:`services.dxf_parser.parse_file`.
+
+    ``outer_ids`` (Phase 2) is an optional pre-confirmed outer-loop entity
+    list (read from ``outer.json`` by the router). When supplied, those IDs
+    are promoted to ``"outer"`` and excluded from the FRAME bucket.
 
     ``delete_candidates`` is keyed by the UI checkbox name
     (``DIMENSION`` / ``BALLOON`` / ``TAP`` / ``FRAME``).
@@ -67,17 +72,26 @@ def classify_entities(
         "FRAME": [],
     }
 
+    outer_set: set[str] = set(outer_ids or [])
+
     # Precompute per-block fingerprints once (cheap and reused for every INSERT).
     # NOTE: ``block_names()`` lower-cases its result, but ``INSERT.dxf.name`` keeps
     # the original case. We iterate ``doc.blocks`` directly so the dict key matches
     # what the lookup will use.
     block_sigs = {block.name: _block_signature(doc, block.name) for block in doc.blocks}
 
-    # Detect "the" frame polyline (largest closed LWPOLYLINE, if any).
+    # Detect "the" frame polyline (largest closed LWPOLYLINE, if any). If the
+    # user already confirmed the outer loop, never let the frame heuristic
+    # steal one of those IDs.
     frame_id = detect_frame_polyline(items)
-    if frame_id is not None:
+    if frame_id is not None and frame_id not in outer_set:
         categories[frame_id] = "frame"
         candidates["FRAME"].append(frame_id)
+
+    # Promote confirmed outer-loop entities before the per-entity loop so
+    # they short-circuit the default ``other`` assignment below.
+    for eid in outer_set:
+        categories[eid] = "outer"
 
     for eid, ent, _geom in items:
         if eid in categories:

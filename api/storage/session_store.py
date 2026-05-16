@@ -196,6 +196,93 @@ class SessionStore:
     def get_deleted_for_file(self, sid: str, fid: str) -> list[str]:
         return list(self.read_deleted(sid).get(fid, []))
 
+    # -- outer-loop / offset state (Phase 2) --------------------------------
+
+    def _state_dir(self, sid: str, fid: str) -> Path:
+        # Sit alongside ``originals/`` rather than under it so a future
+        # session cleanup that wipes the originals leaves no stale state.
+        return self.root / sid / "state" / fid
+
+    def outer_path(self, sid: str, fid: str) -> Path:
+        return self._state_dir(sid, fid) / "outer.json"
+
+    def offset_path(self, sid: str, fid: str) -> Path:
+        return self._state_dir(sid, fid) / "offset.json"
+
+    def read_outer(self, sid: str, fid: str) -> dict | None:
+        """Return the persisted outer-loop result, or ``None`` if unset."""
+
+        path = self.outer_path(sid, fid)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("outer.json unreadable for %s/%s: %s", sid, fid, exc)
+            return None
+
+    def write_outer(self, sid: str, fid: str, payload: dict) -> None:
+        """Atomically overwrite ``outer.json`` with the supplied payload."""
+
+        self.get(sid)  # validate session
+        target = self.outer_path(sid, fid)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".outer.", suffix=".json", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def read_offset(self, sid: str, fid: str) -> dict | None:
+        path = self.offset_path(sid, fid)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("offset.json unreadable for %s/%s: %s", sid, fid, exc)
+            return None
+
+    def write_offset(self, sid: str, fid: str, payload: dict) -> None:
+        self.get(sid)
+        target = self.offset_path(sid, fid)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".offset.", suffix=".json", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def invalidate_offset(self, sid: str, fid: str) -> bool:
+        """Drop any cached offset result for ``fid`` (H11).
+
+        Called whenever the geometry the offset was computed against has
+        moved underneath it: outer re-detection, delete reservation, etc.
+        Returns ``True`` if a file was removed, ``False`` if nothing to do.
+        """
+
+        path = self.offset_path(sid, fid)
+        if not path.exists():
+            return False
+        try:
+            path.unlink()
+            return True
+        except OSError as exc:
+            log.warning("offset.json could not be removed for %s/%s: %s", sid, fid, exc)
+            return False
+
     # -- removal ------------------------------------------------------------
 
     def delete(self, sid: str) -> bool:

@@ -104,6 +104,71 @@ export interface DeleteResult {
   remaining: number;
 }
 
+/* -------------------- Phase 2: outer detection / offset ------------------- */
+
+/** Summary of a closed outer loop. Mirrors the backend `loop_summary` shape. */
+export interface LoopSummary {
+  closed: boolean;
+  segments: number;
+  lines: number;
+  arcs: number;
+  perimeter: number;
+  area: number;
+  bounding_box: BoundingBox;
+}
+
+/** One of the alternative loops the backend evaluated during detection. */
+export interface OuterCandidate {
+  loop: string[];
+  confidence: number;
+  area: number;
+  /** Which strategy produced this candidate (M1). */
+  method?: string;
+}
+
+/** Returned by POST .../detect-outer and .../outer-manual. */
+export interface OuterDetectionResult {
+  status: 'success' | 'low_confidence' | 'failed';
+  confidence: number;
+  /** Winning detection strategy (M1). */
+  method?: string;
+  /** Entity ids that form the outer loop, in traversal order. */
+  outer_loop: string[];
+  loop_summary: LoopSummary;
+  warnings: string[];
+  candidates: OuterCandidate[];
+}
+
+export type CornerJoin = 'arc' | 'miter';
+
+/** Request body for POST .../offset. */
+export interface OffsetRequest {
+  default_mm: number;
+  edge_overrides: Record<string, number>;
+  corner_join: CornerJoin;
+}
+
+/** Polyline geometry returned for the offset result. */
+export interface OffsetLoop {
+  type: 'LWPOLYLINE';
+  /** Vertices as `[x, y, bulge]` triples. */
+  vertices: [number, number, number][];
+  closed: boolean;
+}
+
+/** Returned by POST .../offset. */
+export interface OffsetResult {
+  offset_loop: OffsetLoop;
+  perimeter: number;
+  /** Area of the offset polygon (M1). */
+  area?: number;
+  bounding_box: BoundingBox;
+  /** Pre-formatted display string, e.g. "446 × 286 mm". */
+  plate_size: string;
+  material_efficiency: number;
+  warnings: string[];
+}
+
 /**
  * UI-side grouping for the delete inspector. The 4 categories the v3 mockup
  * surfaces are dim / balloon / tap / frame; "other" stays hidden.
