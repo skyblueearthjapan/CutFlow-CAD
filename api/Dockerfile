@@ -3,13 +3,16 @@
 FROM python:3.12-slim
 
 # System dependencies for C extensions used by Phase 1+ libraries
-# (shapely needs libgeos, pyclipper builds via gcc/g++).
+# (shapely needs libgeos, pyclipper builds via gcc/g++). Phase 6 adds
+# Noto CJK fonts so the ezdxf SVGBackend can render Japanese text
+# (寸法ラベル, ノート) instead of falling back to tofu boxes.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential \
         gcc \
         g++ \
         libgeos-dev \
+        fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for runtime

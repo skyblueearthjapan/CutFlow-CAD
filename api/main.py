@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from routers import files as files_router
 from routers import jobs as jobs_router
@@ -102,6 +103,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="CutFlow•CAD API", version=API_VERSION, lifespan=_lifespan)
+
+# Compress responses ≥ 1 KiB. Phase 6 render-svg payloads can easily be
+# 200–500 KB of XML; gzip cuts that roughly 8–10× over the wire (M4).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.add_middleware(
     CORSMiddleware,

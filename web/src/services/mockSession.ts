@@ -1310,3 +1310,35 @@ export async function mockApplyTemplate(_sid: string, template_id: string): Prom
   // echoes the template back — the UI store applies the values locally.
   return { ...tpl };
 }
+
+/* -------------------- Phase 6: server-rendered SVG (mock) ---------------- */
+
+/**
+ * Phase 6 mock for GET .../render-svg. The real backend uses ezdxf to render
+ * the full drawing (dimensions / hatches / blocks). The mock builds a thin
+ * stand-in from the cached entity bbox so the "リアル表示" toggle has
+ * something to overlay during local development without the live backend —
+ * the foreground operation layer still carries the actual geometry, so the
+ * background being a placeholder is acceptable while wiring the UX.
+ */
+export async function mockRenderSvg(
+  sid: string,
+  fid: string,
+  _options?: { apply_deletions?: boolean; apply_edits?: boolean; dark_theme?: boolean },
+): Promise<import('../types/dxf').RenderedSvg> {
+  const bundle = _store.get(sid);
+  const file = bundle?.files.get(fid);
+  const bb = file?.bounding_box ?? { min_x: 0, min_y: 0, max_x: 1200, max_y: 800 };
+  const w = Math.max(1, bb.max_x - bb.min_x);
+  const h = Math.max(1, bb.max_y - bb.min_y);
+  // Minimal placeholder: a faint dashed outline of the bbox so the operator
+  // can confirm the background layer alignment in local dev. Y-flipped
+  // wrapper so the (Y-up) DXF bbox lines up under the foreground.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${bb.min_x} ${bb.min_y} ${w} ${h}" preserveAspectRatio="xMidYMid meet">`
+    + `<g transform="translate(0 ${bb.max_y + bb.min_y}) scale(1 -1)">`
+    + `<rect x="${bb.min_x}" y="${bb.min_y}" width="${w}" height="${h}" `
+    + `fill="none" stroke="#4dcfe0" stroke-opacity="0.18" stroke-width="0.6" `
+    + `stroke-dasharray="6 4" />`
+    + `</g></svg>`;
+  return { svg, bbox: { ...bb } };
+}

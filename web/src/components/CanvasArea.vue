@@ -14,7 +14,7 @@
  * bottom-right summary — is preserved in both states so the v3 layout is
  * never disturbed.
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useActiveTool } from '../stores/activeTool';
 import { useSession } from '../stores/session';
 import EntityRenderer from './EntityRenderer.vue';
@@ -65,6 +65,12 @@ const {
   addBridge,
   // Phase 5
   nestingResult,
+  // Phase 6 — server-rendered SVG (背景レイヤー)
+  renderedSvg,
+  renderMode,
+  isLoadingRenderedSvg,
+  loadRenderedSvg,
+  toggleRenderMode,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -225,6 +231,53 @@ const liveSummary = computed(() => {
 
 /** Whether the canvas should show live entities (vs the v3 demo). */
 const hasFile = computed(() => currentFile.value !== null);
+
+/* -------------------- Phase 6 — server-rendered SVG (背景レイヤー) -------- */
+
+/** Show the ezdxf-rendered background only when the operator has chosen the
+ *  リアル表示 mode, a file is loaded, the nest preview is NOT taking over the
+ *  canvas, and we actually have a rendered payload to inject. */
+const showBackgroundLayer = computed(() =>
+  renderMode.value === 'real' && hasFile.value && !!renderedSvg.value,
+);
+
+/** Inner SVG content extracted from the server payload — the outer `<svg>`
+ *  tag is stripped so we can re-host the children inside our own foreground-
+ *  aligned wrapper with the canvas viewBox. ezdxf emits an `<svg>` root with
+ *  its own viewBox; injecting that root directly would create a nested
+ *  coordinate system and break alignment with the foreground operation
+ *  layer. By unwrapping to children only and replaying our ``effectiveViewBox``
+ *  on the host `<svg>`, both layers share the exact same DXF coord space. */
+const backgroundInnerSvg = computed<string>(() => {
+  const r = renderedSvg.value;
+  if (!r || !r.svg) return '';
+  // Strip the outermost `<svg ...>` opening + closing tags. We keep the
+  // children verbatim — they retain whatever inner transforms ezdxf set up
+  // (typically a translate + scale(1,-1) for Y-flip, just like our own).
+  const open = r.svg.indexOf('<svg');
+  if (open < 0) return r.svg;
+  const openEnd = r.svg.indexOf('>', open);
+  const closeIdx = r.svg.lastIndexOf('</svg>');
+  if (openEnd < 0 || closeIdx < 0) return r.svg;
+  return r.svg.slice(openEnd + 1, closeIdx);
+});
+
+/** Lazy-load the rendered SVG when entering real mode, when a fresh file
+ *  becomes active, or after the cache was invalidated by a geometry mutation
+ *  (delete / edit / cleanup-frame all call ``clearRenderedSvg`` which empties
+ *  the per-file entry — the watcher below sees ``renderedSvg`` flip to null
+ *  and triggers a refetch transparently). We deliberately do NOT prefetch in
+ *  simple mode so a user who never flips the toggle pays no backend cost. */
+watch(
+  [() => currentFile.value?.file_id ?? null, renderMode, renderedSvg],
+  ([fid, mode, current]) => {
+    if (!fid || mode !== 'real') return;
+    if (current) return;
+    // Fire-and-forget; loadRenderedSvg handles its own errors → lastError.
+    loadRenderedSvg(fid);
+  },
+  { immediate: true },
+);
 
 /** Banner shows either the manual one (outer) OR a session error. */
 const showWarningBanner = computed(() => showBanner.value || !!lastError.value);
@@ -739,6 +792,19 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
       <div class="sep"></div>
       <button title="元に戻す (⌘Z)"><svg><use href="#i-undo" /></svg></button>
       <button title="やり直し (⌘⇧Z)"><svg><use href="#i-redo" /></svg></button>
+      <!-- Phase 6 — リアル/シンプル表示モード切替。背景に ezdxf 完全描画 SVG を
+           被せるかどうかを操作する。クリックで toggle、状態は localStorage
+           に永続化されるので リロードしても直前のモードを覚えている。 -->
+      <div class="sep"></div>
+      <button
+        class="render-mode-btn"
+        :class="{ active: renderMode === 'real' }"
+        :title="renderMode === 'real' ? 'シンプル表示に切替 (背景OFF)' : 'リアル表示に切替 (ezdxf 完全描画)'"
+        @click="toggleRenderMode"
+      >
+        <span class="rm-label">{{ renderMode === 'real' ? 'リアル' : 'シンプル' }}</span>
+        <span v-if="renderMode === 'real' && isLoadingRenderedSvg" class="rm-spin">…</span>
+      </button>
     </div>
 
     <div class="c-banner" :class="{ show: showWarningBanner }">
@@ -746,10 +812,28 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
       <span><b>{{ bannerTitle }}:</b> {{ bannerText }}</span>
     </div>
 
-    <!-- CANVAS SVG -->
+    <!-- ====== Phase 6 — 背景レイヤー (ezdxf 完全描画) ======
+         The server returns a full ezdxf-rendered SVG (dimensions / hatches /
+         block contents all expanded). We strip its outer <svg> tag and
+         re-host the children with our own viewBox so the background is
+         pixel-aligned with the foreground operation layer. ``pointer-events:
+         none`` keeps clicks flowing to the foreground entities. The layer
+         is hidden in nest preview mode (the multi-sheet layout uses its own
+         viewBox and would clash with the per-file background). -->
+    <svg
+      v-if="showBackgroundLayer && !showNestPreview"
+      class="canvas-svg bg-layer"
+      :viewBox="effectiveViewBox"
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden="true"
+      v-html="backgroundInnerSvg"
+    ></svg>
+
+    <!-- CANVAS SVG (foreground / operation layer) -->
     <svg
       ref="svgRef"
-      class="canvas-svg"
+      class="canvas-svg fg-layer"
+      :class="{ 'over-real': showBackgroundLayer }"
       :viewBox="effectiveViewBox"
       preserveAspectRatio="xMidYMid meet"
       @click="onCanvasClick"
@@ -1237,6 +1321,72 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
 </template>
 
 <style scoped>
+/* Phase 6 — 背景レイヤー (ezdxf 完全描画 SVG)。
+   - bg-layer: 背面に配置、クリック透過。z-index は base の .canvas-svg より
+     1 段下に置く (components.css 側の .canvas-svg は absolute / inset:0 のみ
+     なので z-index 未指定 → 0 扱い)。
+   - fg-layer.over-real: 背景がアクティブな時は前景の "other" 系エンティティ
+     を半透明に落として、CAD 完全描画と二重に出ないようにする。
+     outer/hole/tap などの「操作対象として強調したい」ものはそのまま残す。 */
+.canvas-svg.bg-layer {
+  z-index: 0;
+  pointer-events: none;
+  /* ezdxf rendering carries its own colour palette (white-on-dark via the
+     dark_theme flag) — keep it untouched so the operator sees a 1:1 CAD
+     software preview. */
+  opacity: 0.95;
+}
+.canvas-svg.fg-layer {
+  z-index: 1;
+  background: transparent;
+}
+/* リアル表示中は前景の汎用 entity (other / dim / balloon / frame / tap) を
+   半透明に落として「重複表示で読みづらい」状態を避ける。逆に削除候補や外径・
+   穴は強調表示として残しておきたいので、削除選択中 (.is-selected) や outer/
+   hole はフル不透明に戻す。 */
+.canvas-svg.fg-layer.over-real :deep(.ent.other),
+.canvas-svg.fg-layer.over-real :deep(.ent.dim),
+.canvas-svg.fg-layer.over-real :deep(.ent.balloon),
+.canvas-svg.fg-layer.over-real :deep(.ent.frame),
+.canvas-svg.fg-layer.over-real :deep(.ent.tap) {
+  opacity: 0.18;
+}
+.canvas-svg.fg-layer.over-real :deep(.ent.is-selected),
+.canvas-svg.fg-layer.over-real :deep(.ent.is-manual),
+.canvas-svg.fg-layer.over-real :deep(.ent.outer),
+.canvas-svg.fg-layer.over-real :deep(.ent.hole),
+.canvas-svg.fg-layer.over-real :deep(.ent.chamfer),
+.canvas-svg.fg-layer.over-real :deep(.added-hole),
+.canvas-svg.fg-layer.over-real :deep(.added-dim),
+.canvas-svg.fg-layer.over-real :deep(.added-bridge),
+.canvas-svg.fg-layer.over-real :deep(.added-note),
+.canvas-svg.fg-layer.over-real :deep(.vertex-handle),
+.canvas-svg.fg-layer.over-real :deep(.snap-ring),
+.canvas-svg.fg-layer.over-real :deep(.chamfer-marker),
+.canvas-svg.fg-layer.over-real :deep(.chamfer-annotation) {
+  opacity: 1;
+}
+
+/* リアル/シンプル表示モードトグル。c-tools の他ボタンと同じ高さ・角丸で
+   揃え、active 時は cyan (--cy) で点灯。 */
+.render-mode-btn {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  padding: 0 8px !important;
+  min-width: 56px;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.render-mode-btn .rm-spin {
+  font-family: var(--f-mono);
+  color: var(--cy);
+  font-size: 10px;
+  opacity: 0.85;
+}
+
 /* Phase 3 — chamfer corner marker. Purple ring on top of the outer loop,
    filled when the corner has a spec. Matches the .corner-chip palette so
    the inspector and canvas read as one selection state. */

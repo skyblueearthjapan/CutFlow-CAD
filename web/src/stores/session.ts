@@ -47,6 +47,7 @@ import type {
   OuterDetectionResult,
   PdfExportOptions,
   PdfFrameOption,
+  RenderedSvg,
   SavedSession,
   Session,
   SnapResult,
@@ -223,6 +224,30 @@ const _nestSelectedFileIds = ref<Set<string>>(new Set());
 const _isRunningNest = ref<boolean>(false);
 const _isSavingSession = ref<boolean>(false);
 const _isLoadingTemplates = ref<boolean>(false);
+
+/* ------------------- Phase 6 — server-rendered SVG (背景レイヤー) --------- */
+/** Per-file ezdxf-rendered SVG cache, keyed by file_id. The background
+ *  canvas layer reads from this map; entries are populated lazily by
+ *  ``loadRenderedSvg`` and cleared after delete/edit so the next paint
+ *  re-fetches against the updated geometry. */
+const _renderedSvgByFile = shallowRef<Map<string, RenderedSvg>>(new Map());
+const _isLoadingRenderedSvg = ref<boolean>(false);
+/** UI render mode: 'real' overlays the ezdxf SVG behind the operation layer;
+ *  'simple' shows only the Phase 1-5 primitives (legacy / fallback view).
+ *  Persisted to localStorage so a reload preserves the operator's choice. */
+type RenderMode = 'real' | 'simple';
+const _RENDER_MODE_KEY = 'cutflow.renderMode';
+function _readInitialRenderMode(): RenderMode {
+  try {
+    const v = typeof window !== 'undefined'
+      ? window.localStorage?.getItem(_RENDER_MODE_KEY)
+      : null;
+    return v === 'simple' ? 'simple' : 'real';
+  } catch {
+    return 'real';
+  }
+}
+const _renderMode = ref<RenderMode>(_readInitialRenderMode());
 
 /** Assembly-drawing filename pattern. Mirror of the server-side regex in
  *  api/routers/session.py — kept in sync manually since duplicating across
@@ -402,6 +427,13 @@ const bridges = computed<Bridge[]>(() => {
   return _bridgesByFile.value.get(fid) ?? [];
 });
 
+/** Phase 6 — server-rendered SVG for the active file (null until fetched). */
+const renderedSvg = computed<RenderedSvg | null>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return null;
+  return _renderedSvgByFile.value.get(fid) ?? null;
+});
+
 /* ----------------------------- Helpers ---------------------------------- */
 
 function setError(msg: string | null) {
@@ -521,6 +553,16 @@ export function useSession() {
         api.listNotes(sid, fid).catch(() => [] as Note[]),
         api.listBridges(sid, fid).catch(() => [] as Bridge[]),
       ]);
+      // H3 defensive: if the freshly-fetched payload reports a different
+      // deleted_ids set than the one we had cached, the background SVG
+      // is stale (it was rendered against the old deletion set). Drop the
+      // cached entry so the next ``loadRenderedSvg`` re-fetches.
+      const prev = _files.value.get(fid);
+      const prevDeleted = (prev?.deleted_ids ?? []).slice().sort().join(',');
+      const nextDeleted = (data.deleted_ids ?? []).slice().sort().join(',');
+      if (prev && prevDeleted !== nextDeleted) {
+        setMapEntry(_renderedSvgByFile, fid, undefined);
+      }
       // shallowRef requires assigning a new Map ref to trigger updates.
       const next = new Map(_files.value);
       next.set(fid, data);
@@ -587,6 +629,10 @@ export function useSession() {
       await api.deleteEntities(sid, fid, ids);
       // H11: any cached offset is stale once the geometry changes.
       setMapEntry(_offsetByFile, fid, undefined);
+      // Phase 6: background SVG is rendered with apply_deletions=true so it
+      // is stale once the server removes more ids — drop the cache so the
+      // canvas refetch picks up the new render.
+      setMapEntry(_renderedSvgByFile, fid, undefined);
       await loadFile(fid);
       _selectedForDelete.value = new Set();
     } catch (err) {
@@ -924,6 +970,8 @@ export function useSession() {
         removed_count: res.removed_count,
         ids: res.frame_entity_ids,
       };
+      // Phase 6: invalidate cached server render — geometry just changed.
+      setMapEntry(_renderedSvgByFile, fid, undefined);
       // Refresh the file so deleted_ids includes the new ids.
       await loadFile(fid);
     } catch (err) {
@@ -1095,6 +1143,11 @@ export function useSession() {
         new_position: position,
       });
       setMapEntry(_vertexEditsByFile, fid, merged);
+      // Phase 6 / HIGH-2: geometry mutated — drop the stale background
+      // SVG. The next ``loadRenderedSvg`` will re-fetch with
+      // ``apply_edits=true`` so the new render reflects the vertex
+      // translations rather than the pre-edit DXF.
+      setMapEntry(_renderedSvgByFile, fid, undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : '頂点編集に失敗しました');
     }
@@ -1513,6 +1566,66 @@ export function useSession() {
     }
   }
 
+  /* -------------------- Phase 6 — server-rendered SVG ------------------- */
+
+  /** Fetch (and cache) the ezdxf-rendered SVG for the active file. Safe to
+   *  call repeatedly — already-cached entries short-circuit unless ``force``
+   *  is true (used by delete/edit after they mutate the underlying geometry).
+   *  Errors are swallowed into ``lastError`` so a backend that hasn't yet
+   *  exposed ``/render-svg`` (or one returning 500 on an exotic DXF) cannot
+   *  break the canvas — the foreground layer keeps working in either case. */
+  async function loadRenderedSvg(fid?: string, force = false): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const file_id = fid ?? _currentFileId.value;
+    if (!sid || !file_id) return;
+    if (!force && _renderedSvgByFile.value.has(file_id)) return;
+    _isLoadingRenderedSvg.value = true;
+    try {
+      // HIGH-2: the backend honours ``apply_edits=true`` by reading the
+      // persisted Phase 4 vertex edits and baking them into the live
+      // ezdxf document before render, so the background SVG reflects the
+      // operator's line-edit translations rather than a frozen pre-edit
+      // snapshot.
+      const res = await api.renderSvg(sid, file_id, {
+        apply_deletions: true,
+        apply_edits: true,
+        dark_theme: true,
+      });
+      setMapEntry(_renderedSvgByFile, file_id, res);
+    } catch (err) {
+      // Non-fatal: foreground layer remains usable.
+      setError(err instanceof Error ? err.message : '背景レンダリングに失敗しました');
+    } finally {
+      _isLoadingRenderedSvg.value = false;
+    }
+  }
+
+  /** Drop the cached SVG for a file (or the active file if omitted) so the
+   *  next paint re-fetches it. Called after delete / edit / cleanup-frame so
+   *  the background catches up with the geometry change. */
+  function clearRenderedSvg(fid?: string): void {
+    const file_id = fid ?? _currentFileId.value;
+    if (!file_id) return;
+    if (!_renderedSvgByFile.value.has(file_id)) return;
+    setMapEntry(_renderedSvgByFile, file_id, undefined);
+  }
+
+  /** Toggle the canvas render mode. Persisted to localStorage so a reload
+   *  keeps the operator's preference. The CanvasArea component watches this
+   *  and triggers a lazy ``loadRenderedSvg`` when flipping into 'real'. */
+  function setRenderMode(mode: RenderMode): void {
+    if (_renderMode.value === mode) return;
+    _renderMode.value = mode;
+    try {
+      window.localStorage?.setItem(_RENDER_MODE_KEY, mode);
+    } catch {
+      // localStorage may be unavailable (private mode / SSR) — non-fatal.
+    }
+  }
+  function toggleRenderMode(): void {
+    setRenderMode(_renderMode.value === 'real' ? 'simple' : 'real');
+  }
+
   /** Apply a template — server-side write + local Inspector defaults so the
    *  operator sees the change without a tab switch.
    *
@@ -1750,6 +1863,14 @@ export function useSession() {
     loadSavedSession,
     loadTemplates,
     applyTemplate,
+    // Phase 6 — server-rendered SVG (背景レイヤー)
+    renderedSvg,
+    renderMode: _renderMode,
+    isLoadingRenderedSvg: _isLoadingRenderedSvg,
+    loadRenderedSvg,
+    clearRenderedSvg,
+    setRenderMode,
+    toggleRenderMode,
   };
 }
 

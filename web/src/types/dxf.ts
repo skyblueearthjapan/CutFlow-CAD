@@ -492,6 +492,22 @@ export interface ApplyTemplateResponse {
   template?: Template;
 }
 
+/* -------------------- Phase 6: server-rendered SVG ----------------------- */
+
+/** Returned by GET /api/session/{sid}/file/{fid}/render-svg.
+ *  The backend uses ezdxf's high-fidelity SVG backend to render the entire
+ *  drawing (DIMENSIONs / HATCHes / INSERT block contents all expanded) so
+ *  the canvas background reads as a 1:1 CAD-software preview. The ``bbox``
+ *  is the rendered drawing's bounding box in DXF (Y-up) coordinates — the
+ *  frontend uses it to align this background under the foreground operation
+ *  layer with the same viewBox. */
+export interface RenderedSvg {
+  /** Full ``<svg ...>…</svg>`` markup (injected via v-html). */
+  svg: string;
+  /** Bbox of the rendered content in DXF coords (matches the inner SVG). */
+  bbox: BoundingBox;
+}
+
 /** A persisted session listing (GET /api/sessions/saved). */
 export interface SavedSession {
   /** Stable identifier — the operator-chosen name acts as the key. */

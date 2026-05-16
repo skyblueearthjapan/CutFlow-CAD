@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -62,6 +63,7 @@ from services.offset import OffsetError, compute_offset
 from services.outer_detector import detect_outer, evaluate_manual
 from services.pdf_export import export_pdf
 from services.snap import find_snap
+from services.svg_render import render_dxf_to_svg
 from storage import SessionExpired, SessionNotFound, get_store
 
 log = logging.getLogger(__name__)
@@ -436,6 +438,57 @@ async def get_offset(sid: str, fid: str) -> dict:
     if not saved:
         raise HTTPException(status_code=404, detail="加工代未計算")
     return saved
+
+
+@router.get("/render-svg")
+async def get_render_svg(
+    sid: str,
+    fid: str,
+    apply_deletions: bool = Query(True),
+    apply_edits: bool = Query(False),
+    dark_theme: bool = Query(True),
+) -> dict:
+    """Return a CAD-accurate SVG of the file rendered by ezdxf.
+
+    Phase 6: this is the **background layer** the frontend draws beneath
+    its editable overlay. ``apply_deletions`` honours the per-file delete
+    reservation (so removed entities never appear); ``apply_edits`` reads
+    the persisted Phase 4 vertex edits and bakes them into the live ezdxf
+    document before render so the operator's line-edit translations show
+    up under their overlay (HIGH-2); ``dark_theme`` flips the colour
+    policy to ``MONOCHROME_DARK_BG`` so the SVG is legible on the app's
+    dark canvas. The endpoint never mutates state.
+
+    ezdxf's render is CPU-bound and can take 100ms+ on busy DXFs, so we
+    dispatch it via ``run_in_threadpool`` to keep the event loop free for
+    other requests (HIGH-1).
+    """
+
+    store, sf = _resolve(sid, fid)
+    exclude_ids: set[str] | None = None
+    if apply_deletions:
+        deleted = store.get_deleted_for_file(sid, fid)
+        if deleted:
+            exclude_ids = set(deleted)
+
+    edits: list[dict] | None = None
+    if apply_edits:
+        data = store.read_phase4(sid, fid, "edits") or {}
+        items = data.get("edits") or []
+        if items:
+            edits = items
+
+    try:
+        return await run_in_threadpool(
+            render_dxf_to_svg,
+            sf.path,
+            dark_theme=dark_theme,
+            exclude_entity_ids=exclude_ids,
+            edits=edits,
+        )
+    except RuntimeError as exc:
+        log.exception("render-svg failed for %s/%s", sid, fid)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/corners", response_model=CornersResponse)

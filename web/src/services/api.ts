@@ -35,6 +35,7 @@ import type {
   OffsetResult,
   OuterDetectionResult,
   PdfExportOptions,
+  RenderedSvg,
   SavedSession,
   Session,
   SnapKind,
@@ -78,6 +79,8 @@ import {
   mockLoadSession,
   mockGetTemplates,
   mockApplyTemplate,
+  // Phase 6
+  mockRenderSvg,
 } from './mockSession';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -891,6 +894,40 @@ export async function applyTemplate(
     return res.json() as Promise<ApplyTemplateResponse>;
   }
   return jsonOrThrow<ApplyTemplateResponse>(res);
+}
+
+/* -------------------- Phase 6: server-rendered SVG ----------------------- */
+
+/** GET /api/session/{sid}/file/{fid}/render-svg — fetch the high-fidelity
+ *  ezdxf-rendered SVG for the file. Used by the canvas background layer so
+ *  the operator sees a 1:1 CAD-software preview (dimensions / hatches /
+ *  blocks expanded) underneath the operation overlay.
+ *
+ *  ``apply_deletions`` (default true): bake the session's ``deleted_ids`` into
+ *  the rendered output so the background stays in sync with the foreground
+ *  after delete-mode executions. ``apply_edits`` (default false): bake the
+ *  persisted Phase 4 vertex edits into the live ezdxf document so the
+ *  operator's line-edit translations are visible under the overlay
+ *  (HIGH-2). ``dark_theme`` (default true): match the v3 dark canvas
+ *  palette. All flags are forwarded as query params; the backend defaults
+ *  are aligned but we send them explicitly so a future server-side default
+ *  change cannot flip our behaviour silently. */
+export async function renderSvg(
+  sid: string,
+  fid: string,
+  options: { apply_deletions?: boolean; apply_edits?: boolean; dark_theme?: boolean } = {},
+): Promise<RenderedSvg> {
+  if (!(await probeBackend())) return mockRenderSvg(sid, fid, options);
+  const apply = options.apply_deletions ?? true;
+  const applyEdits = options.apply_edits ?? false;
+  const dark = options.dark_theme ?? true;
+  const qs = new URLSearchParams({
+    apply_deletions: apply ? 'true' : 'false',
+    apply_edits: applyEdits ? 'true' : 'false',
+    dark_theme: dark ? 'true' : 'false',
+  }).toString();
+  const res = await fetch(url(`/api/session/${sid}/file/${fid}/render-svg?${qs}`));
+  return jsonOrThrow<RenderedSvg>(res);
 }
 
 /* Re-exports — keep the symbol available even when the mock is missing
