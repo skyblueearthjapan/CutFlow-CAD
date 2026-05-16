@@ -86,7 +86,7 @@
 
 **目的**: 多人数で使い、不足機能を追加する
 
-- [ ] **Tailscale / Cloudflare Tunnel** でVPS公開、社内数人でテスト
+- [ ] **Tailscale Funnel** でVPS公開（`https://cutflow.<tailnet>.ts.net`）、社内数人でテスト
 - [ ] フィードバックに基づいて UI/UX 微調整
 - [ ] **寸法モード** (Phase 4 で本実装):
   - 2点クリックで寸法線追加

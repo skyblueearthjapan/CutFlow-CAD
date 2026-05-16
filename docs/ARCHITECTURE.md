@@ -14,12 +14,13 @@
 │ │  - WebSocket セッション保持                                │ │
 │ └────────────────────────────────────────────────────────────┘ │
 └────────────────────────┬───────────────────────────────────────┘
-                         │ HTTPS
+                         │ HTTPS (自動)
                          ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Cloudflare Tunnel (本番のみ) → cutflow.example.com             │
-│   ・固定IP不要、HTTPS自動                                       │
-│   ・社内IP制限 or Cloudflare Access (Googleアカウント)         │
+│ Tailscale Funnel (本番) → https://cutflow.<tailnet>.ts.net     │
+│   ・ドメイン購入不要、HTTPS自動                                  │
+│   ・訪問者はブラウザだけ (Tailscaleアプリ不要)                  │
+│   ・公開範囲は Tailscale ACL で制御可能                         │
 └────────────────────────┬───────────────────────────────────────┘
                          │
                          ▼
@@ -161,17 +162,34 @@ web/
 | 環境 | 用途 | アクセス方法 |
 |---|---|---|
 | **ローカル** | 個人開発・初期テスト | `docker-compose up` → http://localhost:5173 |
-| **VPSテスト** | 1人テスト・触り心地確認 | SSHポートフォワード `ssh -L 5173:localhost:5173 lineworks-vps-user` |
-| **VPS社内共有** | 複数人テスト | Tailscale VPN または Cloudflare Tunnel |
-| **VPS本番** | 運用 | Cloudflare Tunnel + IP制限 |
+| **VPSテスト (1人)** | 触り心地確認 | SSHポートフォワード `ssh -L 5173:localhost:5173 lineworks-vps-user` |
+| **VPS本番 (社内共有)** | 運用 | **Tailscale Funnel** → `https://cutflow.<tailnet>.ts.net` |
 
-### Cloudflare Tunnel の役割（本番）
+### Tailscale Funnel の役割（本番）
 
-- **固定IP不要**: VPSのグローバルIPを公開せずに済む
-- **HTTPS自動**: Let's Encrypt不要
-- **DDoS耐性**: Cloudflareネットワークが盾
-- **アクセス制御**: 社内IP範囲のみ、または Cloudflare Access で Googleアカウント連携
+- **ドメイン購入不要**: `<好きな名前>.<tailnet名>.ts.net` 形式の固定URLが無料で発行される
+- **HTTPS自動**: Tailscale側が証明書を管理、Let's Encrypt不要
+- **訪問者は何も入れる必要なし**: ブラウザでURLを叩くだけ（Tailscaleアプリ不要）
+- **アクセス制御**: 公開範囲は Tailscale ACL (Funnel 公開 / Tailscaleユーザーのみ / 非公開) で制御
 - **トライアル中は無効化**: 設定なしでローカル/SSHトンネルから始める
+
+### Tailscale Funnel セットアップ手順 (本番デプロイ時)
+
+```bash
+# VPS側で1回だけ
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up                       # ブラウザでログイン
+sudo tailscale serve --bg --https=443 http://localhost:8080
+sudo tailscale funnel 443 on            # インターネットに公開
+
+# 確認
+tailscale status                        # 割り当てられたURLを表示
+# → https://cutflow.<tailnet名>.ts.net
+```
+
+### 補足: Cloudflare Tunnel という選択肢
+
+将来「綺麗なURL (cutflow.your-domain.com 等)」が必要になった場合、Tailscale Funnel から Cloudflare Tunnel に切替可能（要ドメイン購入、年1,500円程度）。アプリ本体には変更不要。
 
 ### VPS同居方針
 
