@@ -33,9 +33,16 @@ const props = withDefaults(defineProps<{
   isManual?: boolean;
   /** Optional: not used for TEXT (per-text local flip is self-contained). */
   flipYBase?: number;
+  /** Phase 6.5 — overlay an invisible thick hit-area so thin lines are
+   *  easier to pick during outer manual drag-sweep. The visible stroke is
+   *  unchanged; a transparent stroke-8 (screen-px, via
+   *  `vector-effect: non-scaling-stroke`) sibling absorbs pointer events.
+   *  Carries the same `data-entity-id` so the picker resolves the same id. */
+  enlargedHitArea?: boolean;
 }>(), {
   isOuter: false,
   isManual: false,
+  enlargedHitArea: false,
 });
 
 const cls = computed(() => {
@@ -172,61 +179,112 @@ function textTransform(y: number): string {
 
 <template>
   <!-- LINE -->
-  <line
-    v-if="entity.type === 'LINE'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :x1="num(entity.geom?.x1)"
-    :y1="num(entity.geom?.y1)"
-    :x2="num(entity.geom?.x2)"
-    :y2="num(entity.geom?.y2)"
-  />
+  <g v-if="entity.type === 'LINE'">
+    <line
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :x1="num(entity.geom?.x1)"
+      :y1="num(entity.geom?.y1)"
+      :x2="num(entity.geom?.x2)"
+      :y2="num(entity.geom?.y2)"
+    />
+    <line
+      :class="cls"
+      :data-entity-id="entity.id"
+      :x1="num(entity.geom?.x1)"
+      :y1="num(entity.geom?.y1)"
+      :x2="num(entity.geom?.x2)"
+      :y2="num(entity.geom?.y2)"
+    />
+  </g>
 
   <!-- CIRCLE -->
-  <circle
-    v-else-if="entity.type === 'CIRCLE'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :cx="num(entity.geom?.cx)"
-    :cy="num(entity.geom?.cy)"
-    :r="num(entity.geom?.r)"
-  />
+  <g v-else-if="entity.type === 'CIRCLE'">
+    <circle
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :cx="num(entity.geom?.cx)"
+      :cy="num(entity.geom?.cy)"
+      :r="num(entity.geom?.r)"
+    />
+    <circle
+      :class="cls"
+      :data-entity-id="entity.id"
+      :cx="num(entity.geom?.cx)"
+      :cy="num(entity.geom?.cy)"
+      :r="num(entity.geom?.r)"
+    />
+  </g>
 
   <!-- ARC -->
-  <path
-    v-else-if="entity.type === 'ARC'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :d="arcPath(num(entity.geom?.cx), num(entity.geom?.cy), num(entity.geom?.r), num(entity.geom?.start_angle), num(entity.geom?.end_angle))"
-  />
+  <g v-else-if="entity.type === 'ARC'">
+    <path
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :d="arcPath(num(entity.geom?.cx), num(entity.geom?.cy), num(entity.geom?.r), num(entity.geom?.start_angle), num(entity.geom?.end_angle))"
+    />
+    <path
+      :class="cls"
+      :data-entity-id="entity.id"
+      :d="arcPath(num(entity.geom?.cx), num(entity.geom?.cy), num(entity.geom?.r), num(entity.geom?.start_angle), num(entity.geom?.end_angle))"
+    />
+  </g>
 
   <!-- LWPOLYLINE / POLYLINE -->
-  <path
-    v-else-if="entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :d="polylinePath(entity.geom?.vertices ?? [], !!entity.geom?.closed)"
-  />
+  <g v-else-if="entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE'">
+    <path
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :d="polylinePath(entity.geom?.vertices ?? [], !!entity.geom?.closed)"
+    />
+    <path
+      :class="cls"
+      :data-entity-id="entity.id"
+      :d="polylinePath(entity.geom?.vertices ?? [], !!entity.geom?.closed)"
+    />
+  </g>
 
   <!-- ELLIPSE (Phase 1: render the full ellipse) -->
-  <ellipse
-    v-else-if="entity.type === 'ELLIPSE'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :cx="ellipsePath(entity.geom ?? {}).cx"
-    :cy="ellipsePath(entity.geom ?? {}).cy"
-    :rx="ellipsePath(entity.geom ?? {}).rx"
-    :ry="ellipsePath(entity.geom ?? {}).ry"
-    :transform="`rotate(${ellipsePath(entity.geom ?? {}).angle} ${ellipsePath(entity.geom ?? {}).cx} ${ellipsePath(entity.geom ?? {}).cy})`"
-  />
+  <g v-else-if="entity.type === 'ELLIPSE'">
+    <ellipse
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :cx="ellipsePath(entity.geom ?? {}).cx"
+      :cy="ellipsePath(entity.geom ?? {}).cy"
+      :rx="ellipsePath(entity.geom ?? {}).rx"
+      :ry="ellipsePath(entity.geom ?? {}).ry"
+      :transform="`rotate(${ellipsePath(entity.geom ?? {}).angle} ${ellipsePath(entity.geom ?? {}).cx} ${ellipsePath(entity.geom ?? {}).cy})`"
+    />
+    <ellipse
+      :class="cls"
+      :data-entity-id="entity.id"
+      :cx="ellipsePath(entity.geom ?? {}).cx"
+      :cy="ellipsePath(entity.geom ?? {}).cy"
+      :rx="ellipsePath(entity.geom ?? {}).rx"
+      :ry="ellipsePath(entity.geom ?? {}).ry"
+      :transform="`rotate(${ellipsePath(entity.geom ?? {}).angle} ${ellipsePath(entity.geom ?? {}).cx} ${ellipsePath(entity.geom ?? {}).cy})`"
+    />
+  </g>
 
   <!-- SPLINE (Phase 1: straight-segment approximation through control points) -->
-  <path
-    v-else-if="entity.type === 'SPLINE'"
-    :class="cls"
-    :data-entity-id="entity.id"
-    :d="splinePath(entity.geom?.control_points ?? [])"
-  />
+  <g v-else-if="entity.type === 'SPLINE'">
+    <path
+      v-if="enlargedHitArea"
+      class="hit-area"
+      :data-entity-id="entity.id"
+      :d="splinePath(entity.geom?.control_points ?? [])"
+    />
+    <path
+      :class="cls"
+      :data-entity-id="entity.id"
+      :d="splinePath(entity.geom?.control_points ?? [])"
+    />
+  </g>
 
   <!-- DIMENSION (simplified: draw anchor-to-anchor lines) -->
   <g
@@ -302,6 +360,20 @@ function textTransform(y: number): string {
 </template>
 
 <style scoped>
+/* Phase 6.5 — invisible thick stroke that absorbs pointer events along the
+   geometry path. ``vector-effect: non-scaling-stroke`` keeps the hit width
+   at ~10 screen px regardless of viewBox zoom so thin lines stay easy to
+   pick on small parts. ``pointer-events: stroke`` keeps clicks pinned to
+   the stroke (no spurious fill-area hits on CIRCLE/ELLIPSE). */
+:deep(.hit-area),
+.hit-area {
+  stroke: transparent;
+  stroke-width: 10;
+  fill: none;
+  pointer-events: stroke;
+  vector-effect: non-scaling-stroke;
+}
+
 /* Selected highlight (blue overlay) for delete mode. Tuned to stay readable
    on both cyan (kept) and amber (candidate) base strokes. */
 :deep(.is-selected),

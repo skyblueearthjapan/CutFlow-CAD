@@ -240,6 +240,27 @@ const svgRef = ref<SVGSVGElement | null>(null);
 const liveCursor = ref<[number, number] | null>(null);
 const editDragOrigin = ref<[number, number] | null>(null);
 
+/* -------------------- Outer manual drag-sweep (Phase 6.5) --------------- */
+/** True while the operator is holding mouse-down inside the outer manual
+ *  mode. Each mousemove during this window hit-tests the cursor against an
+ *  entity (via document.elementFromPoint → closest data-entity-id) and
+ *  appends new ids to the manual chain. Click on the most-recent entity
+ *  after release would normally pop it (see store.addToManual undo); we
+ *  swallow that trailing click via ``_outerSweepJustCommitted``. */
+const outerDragSweep = ref<boolean>(false);
+let _outerSweepJustCommitted = false;
+
+/** Hit-test the cursor against any entity at the current screen pixel.
+ *  Uses ``document.elementFromPoint`` so we pick up either the visible
+ *  stroke OR the invisible ``.hit-area`` sibling (whichever happens to be
+ *  on top). Returns the closest ancestor's ``data-entity-id`` or null. */
+function pickEntityIdAt(clientX: number, clientY: number): string | null {
+  const el = document.elementFromPoint(clientX, clientY);
+  if (!el) return null;
+  const target = (el as Element).closest('[data-entity-id]');
+  return target?.getAttribute('data-entity-id') ?? null;
+}
+
 /* -------------------- Rect-select (delete mode) ------------------------- */
 /** Drag origin (DXF coords) for the delete rect-select tool. When set, the
  *  next mousemove updates ``dragRect`` and mouseup commits the rect to the
@@ -428,6 +449,17 @@ function onCanvasClick(e: MouseEvent) {
     _rectJustCommitted = false;
     return;
   }
+  // Same pattern for outer manual drag-sweep — swallow the trailing click
+  // so the entity just appended via mousemove isn't popped by the store's
+  // "click last id again → undo" behaviour. See ``onCanvasMouseUp``.
+  if (
+    activeTool.value === 'outer' &&
+    manualMode.value &&
+    _outerSweepJustCommitted
+  ) {
+    _outerSweepJustCommitted = false;
+    return;
+  }
   const id = findAttr(e.target, 'data-entity-id');
   if (id) {
     if (activeTool.value === 'delete') {
@@ -451,6 +483,14 @@ let _rectJustCommitted = false;
  *  every frame for smooth visual feedback. */
 let _snapThrottleTs = 0;
 function onCanvasMouseMove(e: MouseEvent) {
+  // Phase 6.5 — extend the outer manual drag-sweep across any entities the
+  // cursor passes over. We still want to update the live cursor readout
+  // below so the bottom-left coordinate HUD keeps moving, hence we fall
+  // through to the normal handler after the hit-test.
+  if (outerDragSweep.value) {
+    const eid = pickEntityIdAt(e.clientX, e.clientY);
+    if (eid && !manualSelection.value.includes(eid)) addToManual(eid);
+  }
   const p = eventToDxf(e);
   if (!p) return;
   liveCursor.value = p;
@@ -511,6 +551,19 @@ function onCanvasMouseMove(e: MouseEvent) {
 const dragPreview = ref<[number, number] | null>(null);
 
 function onCanvasMouseDown(e: MouseEvent) {
+  // Phase 6.5 — outer manual drag-sweep. Active only inside the outer tool
+  // with manualMode ON. Each entity the cursor passes over gets appended
+  // to the manual chain (skip already-selected ids so the store's "click
+  // last id again → pop" undo isn't accidentally triggered mid-sweep).
+  // Sits before the delete rect-select branch so the two modes never
+  // collide (activeTool === 'outer' here, 'delete' there).
+  if (activeTool.value === 'outer' && manualMode.value) {
+    outerDragSweep.value = true;
+    const eid = pickEntityIdAt(e.clientX, e.clientY);
+    if (eid && !manualSelection.value.includes(eid)) addToManual(eid);
+    e.preventDefault();
+    return;
+  }
   // Delete-mode rect-select takes precedence over the entity click handler.
   // We record both the DXF origin (for the SVG <rect> preview) and the raw
   // screen coords (so the px-based drag threshold is independent of the
@@ -544,6 +597,16 @@ function onCanvasMouseDown(e: MouseEvent) {
 }
 
 function onCanvasMouseUp() {
+  // Phase 6.5 — close the outer manual drag-sweep. The trailing ``click``
+  // event would otherwise route to ``addToManual`` for the entity under the
+  // cursor — and since that entity was just appended, the store's
+  // "click last id again → pop" undo would immediately remove it. The
+  // ``_outerSweepJustCommitted`` flag is consumed in ``onCanvasClick``.
+  if (outerDragSweep.value) {
+    outerDragSweep.value = false;
+    _outerSweepJustCommitted = true;
+    return;
+  }
   // Delete-mode rect-select: commit the rect if the drag exceeded the
   // click threshold. Otherwise leave the click handler to do its job (the
   // browser still fires `click` after mouseup for in-place releases).
@@ -971,6 +1034,7 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
             :is-outer="outerEntityIdSet.has(ent.id)"
             :is-manual="manualSelectionSet.has(ent.id)"
             :flip-y-base="flipYBase"
+            :enlarged-hit-area="activeTool === 'outer' && manualMode"
           />
 
           <!-- Offset preview: dashed cyan loop drawn outside the outer.
