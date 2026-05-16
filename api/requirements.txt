@@ -15,3 +15,7 @@ pyclipper>=1.3,<2.0
 
 # PDF output (Phase 3+)
 reportlab>=4.1,<5.0
+
+# Tests (kept here so docker image can lint-run the suite if needed)
+pytest>=8.0,<9.0
+httpx>=0.27,<1.0

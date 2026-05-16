@@ -3,6 +3,7 @@
 // クリックで activeTool を切替、`body[data-mode]` は store の watch が同期。
 import { computed } from 'vue';
 import { useActiveTool } from '../stores/activeTool';
+import { useSession } from '../stores/session';
 import type { ToolMode } from '../types/tools';
 
 interface RailItem {
@@ -13,12 +14,19 @@ interface RailItem {
   badge?: string;
 }
 
-const editTools: RailItem[] = [
+const { currentFile, totalDeleteCandidates } = useSession();
+
+// Delete badge is dynamic when a file is loaded; otherwise the v3 demo value.
+const deleteBadge = computed(() =>
+  currentFile.value ? String(totalDeleteCandidates.value) : '12',
+);
+
+const editTools = computed<RailItem[]>(() => [
   { mode: 'outer',   icon: 'i-shape',   label: '外形',   key: '1' },
-  { mode: 'delete',  icon: 'i-delete',  label: '削除',   key: '2', badge: '12' },
+  { mode: 'delete',  icon: 'i-delete',  label: '削除',   key: '2', badge: deleteBadge.value },
   { mode: 'offset',  icon: 'i-offset',  label: '加工代', key: '3' },
   { mode: 'chamfer', icon: 'i-chamfer', label: 'C面',    key: '4' },
-];
+]);
 
 const drawTools: RailItem[] = [
   { mode: 'dim',  icon: 'i-dim',       label: '寸法',   key: '5' },

@@ -1,30 +1,58 @@
 <script setup lang="ts">
-// 右インスペクタ (340px)。
-// 現在の activeTool に応じて tool-head + mode-body を切替。
-// 各ツールのボディは mockup の `panels[mode]` をそのまま Vue template に移植。
-// 行/チップの ON 状態は ref(Set) で reactive 管理し、DOM 直接操作はしない。
-// バナー表示は activeTool ストアに集約。
+/**
+ * Right inspector (340px).
+ *
+ * Phase 1 changes:
+ *  - The **delete** panel is now backed by the session store
+ *    (`deleteRows`, `selectedForDelete`, `toggleCategory`, `executeDelete`).
+ *  - Per-category checkboxes bulk-add/remove all entities in that category;
+ *    badge counts reflect the actual file data.
+ *  - The "削除後プレビュー" shows live remaining-entity numbers.
+ *  - The action row's right button executes the delete via the API.
+ *  - When no file is loaded the panel falls back to v3-mockup numbers so the
+ *    design is unchanged at startup.
+ *
+ * Every other tool's body is kept as the Phase 0 placeholder so we don't
+ * scope-creep into outer/offset/chamfer/etc.
+ */
 import { computed, ref } from 'vue';
 import { useActiveTool, toolMeta } from '../stores/activeTool';
+import { useSession } from '../stores/session';
 
 const { activeTool, toggleBanner } = useActiveTool();
+const {
+  currentFile,
+  deleteRows,
+  selectedForDelete,
+  remainingAfterDelete,
+  totalDeleteCandidates,
+  toggleCategory,
+  isCategoryOn,
+  clearSelection,
+  executeDelete,
+  isDeleting,
+} = useSession();
+
 const meta = computed(() => toolMeta[activeTool.value]);
 
-// mockup の初期 on 状態 (寸法線/バルーン/タップ穴マーク) を踏襲
-const selectedEntRows = ref<Set<number>>(new Set([0, 1, 2]));
-function toggleEntRow(i: number) {
-  const next = new Set(selectedEntRows.value);
-  if (next.has(i)) next.delete(i); else next.add(i);
-  selectedEntRows.value = next;
-}
-
-// chamfer ツール: 角チップの ON 状態 (mockup 初期: 右上のみ)
+// chamfer tool: corner chip ON state (mockup initial: top-right only).
+// Kept as local state because chamfer is Phase 3 — UI-only for now.
 const selectedCorners = ref<Set<number>>(new Set([0]));
 function toggleCorner(i: number) {
   const next = new Set(selectedCorners.value);
-  if (next.has(i)) next.delete(i); else next.add(i);
+  if (next.has(i)) next.delete(i);
+  else next.add(i);
   selectedCorners.value = next;
 }
+
+/** Total number of entities that would be deleted on confirm. */
+const deleteCount = computed(() => selectedForDelete.value.size);
+
+/** Pill (top-right of tool head) for delete mode: live candidate count. */
+const deletePillText = computed(() => {
+  if (!currentFile.value) return meta.value.pill.text;
+  return `${totalDeleteCandidates.value} 件`;
+});
 </script>
 
 <template>
@@ -36,7 +64,10 @@ function toggleCorner(i: number) {
         <div class="tname">{{ meta.name }}</div>
         <div class="tsub">{{ meta.sub }}</div>
       </div>
-      <span class="pill tpill" :class="meta.pill.cls">{{ meta.pill.text }}</span>
+      <span
+        class="pill tpill"
+        :class="meta.pill.cls"
+      >{{ activeTool === 'delete' ? deletePillText : meta.pill.text }}</span>
     </div>
 
     <!-- mode-body: 各ツールごとの本文 -->
@@ -73,47 +104,97 @@ function toggleCorner(i: number) {
         </div>
       </template>
 
-      <!-- ========== delete ========== -->
+      <!-- ========== delete (Phase 1 — wired to session store) ========== -->
       <template v-else-if="activeTool === 'delete'">
         <div class="section-block">
           <p class="lead">
             DXF由来の <em>製図情報</em> を出力前に取り除きます。種類別にトグル、またはキャンバスで個別選択。
           </p>
 
-          <div class="entity-list">
-            <div class="ent-row" :class="{ on: selectedEntRows.has(0) }" @click="toggleEntRow(0)">
-              <span class="cb"></span>
-              <div><div class="nm">寸法線</div><div class="ns">DIMENSION</div></div>
-              <span class="cnt">5</span>
+          <!-- File loaded → real rows from the parsed entity payload -->
+          <template v-if="currentFile">
+            <div class="entity-list">
+              <div
+                v-for="row in deleteRows"
+                :key="row.key"
+                class="ent-row"
+                :class="{ on: isCategoryOn(row.key) }"
+                @click="toggleCategory(row.key)"
+              >
+                <span class="cb"></span>
+                <div>
+                  <div class="nm">{{ row.label }}</div>
+                  <div class="ns">{{ row.sub }}</div>
+                </div>
+                <span class="cnt">{{ row.ids.length }}</span>
+              </div>
             </div>
-            <div class="ent-row" :class="{ on: selectedEntRows.has(1) }" @click="toggleEntRow(1)">
-              <span class="cb"></span>
-              <div><div class="nm">バルーン</div><div class="ns">BALLOON</div></div>
-              <span class="cnt">2</span>
+          </template>
+
+          <!-- No file → v3 mockup placeholder rows (read-only) -->
+          <template v-else>
+            <div class="entity-list">
+              <div class="ent-row on">
+                <span class="cb"></span>
+                <div><div class="nm">寸法線</div><div class="ns">DIMENSION</div></div>
+                <span class="cnt">5</span>
+              </div>
+              <div class="ent-row on">
+                <span class="cb"></span>
+                <div><div class="nm">バルーン</div><div class="ns">BALLOON</div></div>
+                <span class="cnt">2</span>
+              </div>
+              <div class="ent-row on">
+                <span class="cb"></span>
+                <div><div class="nm">タップ穴マーク</div><div class="ns">TAP-MARK · M8 × 4</div></div>
+                <span class="cnt">4</span>
+              </div>
+              <div class="ent-row">
+                <span class="cb"></span>
+                <div><div class="nm">図枠 / 表題欄</div><div class="ns">PRODUCTION-FRAME</div></div>
+                <span class="cnt">1</span>
+              </div>
             </div>
-            <div class="ent-row" :class="{ on: selectedEntRows.has(2) }" @click="toggleEntRow(2)">
-              <span class="cb"></span>
-              <div><div class="nm">タップ穴マーク</div><div class="ns">TAP-MARK · M8 × 4</div></div>
-              <span class="cnt">4</span>
-            </div>
-            <div class="ent-row" :class="{ on: selectedEntRows.has(3) }" @click="toggleEntRow(3)">
-              <span class="cb"></span>
-              <div><div class="nm">図枠 / 表題欄</div><div class="ns">PRODUCTION-FRAME</div></div>
-              <span class="cnt">1</span>
-            </div>
-          </div>
+          </template>
         </div>
 
         <div class="summary">
           <h6>削除後プレビュー</h6>
-          <div class="summary-row"><span class="k">残るエンティティ</span><span class="v big">150</span></div>
-          <div class="summary-row"><span class="k">外径</span><span class="v">12 / 12 OK</span></div>
-          <div class="summary-row"><span class="k">推定切断長</span><span class="v">1,847.3<span class="u">mm</span></span></div>
+          <template v-if="currentFile">
+            <div class="summary-row">
+              <span class="k">残るエンティティ</span>
+              <span class="v big">{{ remainingAfterDelete }}</span>
+            </div>
+            <div class="summary-row">
+              <span class="k">選択中</span>
+              <span class="v">{{ deleteCount }} 件</span>
+            </div>
+            <div class="summary-row">
+              <span class="k">削除候補 合計</span>
+              <span class="v">{{ totalDeleteCandidates }} 件</span>
+            </div>
+          </template>
+          <template v-else>
+            <div class="summary-row"><span class="k">残るエンティティ</span><span class="v big">150</span></div>
+            <div class="summary-row"><span class="k">外径</span><span class="v">12 / 12 OK</span></div>
+            <div class="summary-row"><span class="k">推定切断長</span><span class="v">1,847.3<span class="u">mm</span></span></div>
+          </template>
         </div>
 
         <div class="action-row">
-          <button class="action-btn">プレビュー</button>
-          <button class="action-btn danger"><svg><use href="#i-delete" /></svg>12件を削除</button>
+          <button
+            class="action-btn"
+            :disabled="!currentFile || deleteCount === 0"
+            @click="clearSelection"
+          >選択解除</button>
+          <button
+            class="action-btn danger"
+            :disabled="!currentFile || deleteCount === 0 || isDeleting"
+            @click="executeDelete"
+          >
+            <svg><use href="#i-delete" /></svg>
+            {{ isDeleting ? '削除中…' : `${deleteCount || (currentFile ? 0 : 12)}件を削除` }}
+          </button>
         </div>
       </template>
 
