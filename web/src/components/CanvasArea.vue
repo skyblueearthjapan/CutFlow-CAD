@@ -30,6 +30,7 @@ const {
   isLoadingFile,
   // Phase 2
   outerEntityIdSet,
+  outerDetection,
   offsetResult,
   manualMode,
   manualSelection,
@@ -41,6 +42,27 @@ const {
   chamferDefaultSize,
   setChamferSpec,
   removeChamferSpec,
+  // Phase 4
+  dimensions,
+  vertexEdits,
+  addedHoles,
+  notes,
+  bridges,
+  pendingDimStart,
+  setPendingDimStart,
+  setDimTwoPointMode,
+  addDimension,
+  editSelection,
+  editSnapEnabled,
+  selectEditTarget,
+  snapPoint,
+  applyVertexEdit,
+  addHole,
+  notePreset,
+  notePendingAnchor,
+  setNotePendingAnchor,
+  addNote,
+  addBridge,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -48,8 +70,11 @@ const cursorY = ref('218.5');
 let timer: number | undefined;
 let t = 0;
 onMounted(() => {
-  // v3 mockup keeps a slow cursor wobble for "live feel"; preserved.
+  // v3 mockup keeps a slow cursor wobble for "live feel"; preserved for the
+  // empty (pre-upload) state. Once a file is loaded the canvas mousemove
+  // handler takes over via `onCanvasMouseMove`.
   timer = window.setInterval(() => {
+    if (currentFile.value) return;
     t += 0.05;
     cursorX.value = (412 + Math.sin(t) * 0.4).toFixed(1);
     cursorY.value = (218.5 + Math.cos(t * 1.3) * 0.3).toFixed(1);
@@ -115,6 +140,45 @@ const bannerText = computed(() =>
 );
 const bannerTitle = computed(() => (lastError.value ? 'エラー' : '注意'));
 
+/* -------------------- Phase 4 — coord conversion + drag state ----------- */
+
+const svgRef = ref<SVGSVGElement | null>(null);
+/** Live cursor position in DXF coordinates (Y-up). Updated on mousemove so
+ *  the dim 1-point preview and snap indicator render in real time. */
+const liveCursor = ref<[number, number] | null>(null);
+const editDragOrigin = ref<[number, number] | null>(null);
+
+/** Convert a DOM click/mouse event to DXF (Y-up) coordinates by walking the
+ *  inverse of the SVG CTM and undoing the parent ``scale(1,-1)`` flip. */
+function eventToDxf(e: MouseEvent): [number, number] | null {
+  const svg = svgRef.value;
+  const f = currentFile.value;
+  if (!svg || !f) return null;
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX;
+  pt.y = e.clientY;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const inv = ctm.inverse();
+  const local = pt.matrixTransform(inv);
+  // Undo Y-flip applied by flipTransform — see flipTransform() above. The
+  // wrapper translates by (max_y + min_y) then scales (1,-1), so the
+  // SVG-space Y maps back to DXF Y as ``(max_y + min_y) - svgY``.
+  const dxfY = f.bounding_box.max_y + f.bounding_box.min_y - local.y;
+  return [local.x, dxfY];
+}
+
+/** Walk up the DOM to find an attribute (data-entity-id / data-corner-id). */
+function findAttr(el: EventTarget | null, name: string): string | null {
+  let node: SVGElement | null = el as SVGElement;
+  while (node && node instanceof SVGElement) {
+    const v = node.getAttribute(name);
+    if (v) return v;
+    node = node.parentNode as SVGElement | null;
+  }
+  return null;
+}
+
 /** Canvas-level click handler — propagates entity / corner hits to the store.
  *  - delete mode: toggles the entity in/out of the delete selection.
  *  - outer mode + manual chain mode: appends the entity to the manual chain
@@ -122,50 +186,217 @@ const bannerTitle = computed(() => (lastError.value ? 'エラー' : '注意'));
  *  - chamfer mode: a corner marker carries `data-corner-id` — clicking it
  *    toggles the spec via the current default size/angle. Corner clicks
  *    take precedence over entity clicks so users don't accidentally select
- *    underlying lines. */
+ *    underlying lines.
+ *  - Phase 4 modes (dim / edit / hole / note / bridge): translate the click
+ *    to DXF coordinates and dispatch to the appropriate store action. */
 function onCanvasClick(e: MouseEvent) {
   // Chamfer mode: handle corner-id hits first (the marker sits on top of
   // entities so the user's click intent is to toggle the corner).
   if (activeTool.value === 'chamfer') {
-    let el: SVGElement | null = e.target as SVGElement;
-    while (el && el instanceof SVGElement) {
-      const cid = el.getAttribute('data-corner-id');
-      if (cid) {
-        if (chamferSpecByCorner.value.has(cid)) {
-          removeChamferSpec(cid);
-        } else {
-          // H6: canvas corner click is C面 only — angle is fixed 45°.
-          setChamferSpec({
-            corner_id: cid,
-            size_mm: chamferDefaultSize.value,
-            angle_deg: 45,
-            type: 'C',
-          });
-        }
-        return;
+    const cid = findAttr(e.target, 'data-corner-id');
+    if (cid) {
+      if (chamferSpecByCorner.value.has(cid)) {
+        removeChamferSpec(cid);
+      } else {
+        // H6: canvas corner click is C面 only — angle is fixed 45°.
+        setChamferSpec({
+          corner_id: cid,
+          size_mm: chamferDefaultSize.value,
+          angle_deg: 45,
+          type: 'C',
+        });
       }
-      el = el.parentNode as SVGElement | null;
     }
     return;
   }
+
+  /* -------------------- Phase 4 dispatch ------------------------------- */
+
+  // dim mode — 2-click placement. Snap-assist via /snap so endpoints stick.
+  if (activeTool.value === 'dim') {
+    if (!currentFile.value) return;
+    const p = eventToDxf(e);
+    if (!p) return;
+    snapPoint(p).then((snap) => {
+      // C1: SnapResult shape is {snapped, type}; fall back to the raw
+      // cursor when nothing matched within tolerance.
+      const point: [number, number] = (snap.snapped ?? p) as [number, number];
+      if (!pendingDimStart.value) {
+        setPendingDimStart(point);
+        setDimTwoPointMode(true);
+      } else {
+        // 2nd click: commit and reset.
+        addDimension(pendingDimStart.value, point);
+        setPendingDimStart(null);
+        setDimTwoPointMode(false);
+      }
+    });
+    return;
+  }
+
+  // edit mode — entity click selects, then drag (handled by mousedown) moves.
+  if (activeTool.value === 'edit') {
+    const id = findAttr(e.target, 'data-entity-id');
+    if (id) {
+      // Pick vertex 0 for now (LINE start); polyline vertex picking lives in
+      // the drag handlers attached to per-vertex handles (see template).
+      const vIdx = Number(findAttr(e.target, 'data-vertex-index') ?? 0);
+      selectEditTarget(id, vIdx);
+    } else {
+      selectEditTarget(null);
+    }
+    return;
+  }
+
+  // hole mode — click adds a CIRCLE at the cursor.
+  if (activeTool.value === 'hole') {
+    if (!currentFile.value) return;
+    const p = eventToDxf(e);
+    if (!p) return;
+    addHole(p);
+    return;
+  }
+
+  // note mode — click opens the text-input modal anchored at this point.
+  if (activeTool.value === 'note') {
+    if (!currentFile.value) return;
+    const p = eventToDxf(e);
+    if (!p) return;
+    setNotePendingAnchor(p);
+    return;
+  }
+
+  // bridge mode — only outer-loop edges accept a bridge.
+  // C1: addBridge takes (edge_id, position_ratio); we derive the ratio
+  // from where the click landed on the chosen edge segment so the
+  // backend can place the tab without us sending raw XY.
+  if (activeTool.value === 'bridge') {
+    const id = findAttr(e.target, 'data-entity-id');
+    if (!id || !outerEntityIdSet.value.has(id)) return;
+    const p = eventToDxf(e);
+    if (!p) return;
+    const loop = outerDetection.value?.outer_loop ?? [];
+    const idx = loop.indexOf(id);
+    if (idx < 0) return;
+    const edge_id = `E${idx + 1}`;
+    // Project click onto the LINE segment of the clicked entity (if it's
+    // a LINE) for a real ratio; fall back to 0.5 for ARC/POLYLINE which
+    // need server-side geometry to do precisely.
+    const ent = currentFile.value?.entities.find((x) => x.id === id);
+    let ratio = 0.5;
+    if (ent && ent.type === 'LINE') {
+      const x1 = Number(ent.geom?.x1 ?? 0);
+      const y1 = Number(ent.geom?.y1 ?? 0);
+      const x2 = Number(ent.geom?.x2 ?? 0);
+      const y2 = Number(ent.geom?.y2 ?? 0);
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len2 = dx * dx + dy * dy;
+      if (len2 > 1e-12) {
+        ratio = ((p[0] - x1) * dx + (p[1] - y1) * dy) / len2;
+        ratio = Math.max(0, Math.min(1, ratio));
+      }
+    }
+    addBridge(edge_id, ratio);
+    return;
+  }
+
   if (activeTool.value !== 'delete' && !(activeTool.value === 'outer' && manualMode.value)) {
     return;
   }
-  // Walk up from the click target to find the nearest element carrying a
-  // data-entity-id attribute (the EntityRenderer puts it on the SVG element).
-  let el: SVGElement | null = e.target as SVGElement;
-  while (el && el instanceof SVGElement) {
-    const id = el.getAttribute('data-entity-id');
-    if (id) {
-      if (activeTool.value === 'delete') {
-        selectEntity(id);
-      } else {
-        addToManual(id);
-      }
-      return;
+  const id = findAttr(e.target, 'data-entity-id');
+  if (id) {
+    if (activeTool.value === 'delete') {
+      selectEntity(id);
+    } else {
+      addToManual(id);
     }
-    el = el.parentNode as SVGElement | null;
   }
+}
+
+/** Mouse move — drives the live cursor + dim preview + snap indicator.
+ *  M5: snap requests are throttled to ~5 Hz during drags so a fast
+ *  mousemove doesn't fire dozens of /snap POSTs per second (each call
+ *  re-parses the DXF on the backend). The drag preview itself updates
+ *  every frame for smooth visual feedback. */
+let _snapThrottleTs = 0;
+function onCanvasMouseMove(e: MouseEvent) {
+  const p = eventToDxf(e);
+  if (!p) return;
+  liveCursor.value = p;
+  cursorX.value = p[0].toFixed(1);
+  cursorY.value = p[1].toFixed(1);
+  // Active drag (edit mode): apply snap + ortho, redraw the moving vertex.
+  if (activeTool.value === 'edit' && editDragOrigin.value && editSelection.value) {
+    let next: [number, number] = p;
+    if (editSnapEnabled.value) {
+      const now = performance.now();
+      if (now - _snapThrottleTs > 200) {
+        _snapThrottleTs = now;
+        snapPoint(p); // populates lastSnap for the overlay; non-blocking.
+      }
+    }
+    if ((e.shiftKey || /* ortho toggle */ false) && editDragOrigin.value) {
+      const dx = Math.abs(p[0] - editDragOrigin.value[0]);
+      const dy = Math.abs(p[1] - editDragOrigin.value[1]);
+      next = dx >= dy
+        ? [p[0], editDragOrigin.value[1]]
+        : [editDragOrigin.value[0], p[1]];
+    }
+    // Buffered preview only — the commit happens on mouseup so we don't spam
+    // the backend with one PUT per pixel.
+    dragPreview.value = next;
+  }
+}
+
+/** Edit-mode drag: track preview, commit on mouseup. */
+const dragPreview = ref<[number, number] | null>(null);
+
+function onCanvasMouseDown(e: MouseEvent) {
+  if (activeTool.value !== 'edit') return;
+  // Allow first-click-and-drag: if the user pressed on a vertex handle, select
+  // it now so the subsequent mousemove drags it without requiring a separate
+  // click-then-drag sequence.
+  const id = findAttr(e.target, 'data-entity-id');
+  if (id) {
+    const vIdx = Number(findAttr(e.target, 'data-vertex-index') ?? 0);
+    selectEditTarget(id, vIdx);
+  }
+  if (!editSelection.value && !id) return;
+  const p = eventToDxf(e);
+  if (!p) return;
+  editDragOrigin.value = p;
+  dragPreview.value = p;
+}
+
+function onCanvasMouseUp() {
+  if (
+    activeTool.value === 'edit' &&
+    editSelection.value &&
+    editDragOrigin.value &&
+    dragPreview.value
+  ) {
+    applyVertexEdit(
+      editSelection.value.entity_id,
+      editSelection.value.vertex_index,
+      editDragOrigin.value,
+      dragPreview.value,
+    );
+  }
+  editDragOrigin.value = null;
+  dragPreview.value = null;
+}
+
+/** Note text-input modal: bound to a Vue ref so the input renders inline. */
+const noteText = ref('');
+function onNoteConfirm() {
+  if (!notePendingAnchor.value) return;
+  addNote(notePendingAnchor.value, noteText.value);
+  noteText.value = '';
+}
+function onNoteCancel() {
+  noteText.value = '';
+  setNotePendingAnchor(null);
 }
 
 /* -------------------- Phase 2 — outer / offset overlay ------------------- */
@@ -225,6 +456,91 @@ const chamferGlyphSize = computed<number>(() => {
   return Math.max(8, Math.min(span * 0.018, 14));
 });
 
+/* -------------------- Phase 4 — rendering helpers ----------------------- */
+
+/** Show dim/hole/note/bridge overlays only when the relevant tool is active
+ *  OR when there is at least one item (so a switched-away tool's work stays
+ *  visible in delete/outer/offset/chamfer where it makes sense as context). */
+const showDimOverlay = computed(
+  () => dimensions.value.length > 0 || activeTool.value === 'dim',
+);
+const showHoleOverlay = computed(
+  () => addedHoles.value.length > 0 || activeTool.value === 'hole',
+);
+const showNoteOverlay = computed(
+  () => notes.value.length > 0 || activeTool.value === 'note',
+);
+const showBridgeOverlay = computed(
+  () => bridges.value.length > 0 || activeTool.value === 'bridge',
+);
+const showEditHandles = computed(() => activeTool.value === 'edit');
+
+/** Tick / glyph size keyed off the file bbox so they read well at any scale. */
+const overlayScale = computed<number>(() => {
+  const f = currentFile.value;
+  if (!f) return 1;
+  const bb = f.bounding_box;
+  const span = Math.max(bb.max_x - bb.min_x, bb.max_y - bb.min_y, 1);
+  return Math.max(span * 0.008, 1);
+});
+
+/** Snap indicator: small ring at the snap point (only in dim/edit modes). */
+const showSnapIndicator = computed(
+  () =>
+    (activeTool.value === 'dim' || activeTool.value === 'edit') &&
+    !!liveCursor.value &&
+    !!currentFile.value,
+);
+
+/** Active dim preview (rubber band) — only while waiting for the 2nd click. */
+const dimPreviewStart = computed(() => pendingDimStart.value);
+const dimPreviewEnd = computed(() => liveCursor.value);
+
+/** Edited vertex lookup: entity_id+vertex_index → new position.
+ *  C1: backend field is ``new_position`` (was ``position`` legacy). */
+const editedVertexMap = computed<Map<string, [number, number]>>(() => {
+  const map = new Map<string, [number, number]>();
+  for (const e of vertexEdits.value) {
+    map.set(
+      `${e.entity_id}#${e.vertex_index}`,
+      [e.new_position[0], e.new_position[1]],
+    );
+  }
+  return map;
+});
+
+/** Vertex handles for the edit tool — collect (x,y) per LINE endpoint of
+ *  every visible entity. Polylines / arcs are skipped for now to keep the
+ *  overlay readable; expanding to other types is a follow-up (T39 spec). */
+interface VertexHandle {
+  entity_id: string;
+  vertex_index: number;
+  x: number;
+  y: number;
+}
+const vertexHandles = computed<VertexHandle[]>(() => {
+  if (!showEditHandles.value) return [];
+  const out: VertexHandle[] = [];
+  for (const e of visibleEntities.value) {
+    if (e.type !== 'LINE') continue;
+    const eMap0 = editedVertexMap.value.get(`${e.id}#0`);
+    const eMap1 = editedVertexMap.value.get(`${e.id}#1`);
+    out.push({
+      entity_id: e.id,
+      vertex_index: 0,
+      x: eMap0 ? eMap0[0] : Number(e.geom?.x1 ?? 0),
+      y: eMap0 ? eMap0[1] : Number(e.geom?.y1 ?? 0),
+    });
+    out.push({
+      entity_id: e.id,
+      vertex_index: 1,
+      x: eMap1 ? eMap1[0] : Number(e.geom?.x2 ?? 0),
+      y: eMap1 ? eMap1[1] : Number(e.geom?.y2 ?? 0),
+    });
+  }
+  return out;
+});
+
 /** "Fit" button — for now just resets to the bounding-box viewBox (no zoom
  *  state to clear yet). Kept as a stub so the button is wired and visible. */
 function onFit() {
@@ -255,10 +571,15 @@ function onFit() {
 
     <!-- CANVAS SVG -->
     <svg
+      ref="svgRef"
       class="canvas-svg"
       :viewBox="viewBox"
       preserveAspectRatio="xMidYMid meet"
       @click="onCanvasClick"
+      @mousemove="onCanvasMouseMove"
+      @mousedown="onCanvasMouseDown"
+      @mouseup="onCanvasMouseUp"
+      @mouseleave="onCanvasMouseUp"
     >
       <defs>
         <marker id="arr-am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
@@ -340,6 +661,131 @@ function onFit() {
               />
             </g>
           </template>
+
+          <!-- ============== Phase 4 overlays ============== -->
+
+          <!-- Added holes: CIRCLE drawn with the v3 .ent.hole style. -->
+          <template v-if="showHoleOverlay">
+            <circle
+              v-for="h in addedHoles"
+              :key="h.id"
+              class="ent hole added-hole"
+              :cx="h.position[0]"
+              :cy="h.position[1]"
+              :r="h.diameter / 2"
+            />
+          </template>
+
+          <!-- Dimensions: line with arrowheads + counter-flipped text. -->
+          <template v-if="showDimOverlay">
+            <g v-for="d in dimensions" :key="d.id" class="added-dim">
+              <line
+                class="ent dim"
+                :x1="d.p1[0]"
+                :y1="d.p1[1]"
+                :x2="d.p2[0]"
+                :y2="d.p2[1]"
+                marker-end="url(#arr-am)"
+                marker-start="url(#arr-am)"
+              />
+              <g :transform="`scale(1, -1) translate(0, ${-(d.p1[1] + d.p2[1])})`">
+                <text
+                  class="lbl-am"
+                  :x="(d.p1[0] + d.p2[0]) / 2"
+                  :y="(d.p1[1] + d.p2[1]) / 2 - overlayScale * 4"
+                  text-anchor="middle"
+                  :font-size="overlayScale * 10"
+                >{{ d.text_override ?? Math.hypot(d.p2[0] - d.p1[0], d.p2[1] - d.p1[1]).toFixed(1) }}</text>
+              </g>
+            </g>
+            <!-- Rubber band: 1st-point → live cursor preview. -->
+            <line
+              v-if="dimPreviewStart && dimPreviewEnd && activeTool === 'dim'"
+              class="dim-preview"
+              :x1="dimPreviewStart[0]"
+              :y1="dimPreviewStart[1]"
+              :x2="dimPreviewEnd[0]"
+              :y2="dimPreviewEnd[1]"
+            />
+            <circle
+              v-if="dimPreviewStart && activeTool === 'dim'"
+              class="dim-anchor"
+              :cx="dimPreviewStart[0]"
+              :cy="dimPreviewStart[1]"
+              :r="overlayScale * 2"
+            />
+          </template>
+
+          <!-- Notes: counter-flipped text glyphs. -->
+          <template v-if="showNoteOverlay">
+            <g
+              v-for="n in notes"
+              :key="n.id"
+              :transform="`scale(1, -1) translate(0, ${-2 * n.position[1]})`"
+              class="added-note"
+            >
+              <text
+                :class="['note-glyph', `note-${n.preset}`]"
+                :x="n.position[0]"
+                :y="n.position[1]"
+                :font-size="overlayScale * n.font_size_mm * 4"
+              >{{ n.text }}</text>
+            </g>
+          </template>
+
+          <!-- Bridges: short gap-marker (white square) sitting on the edge.
+               C1: ``position`` is server-computed; for bridges that have
+               not been enriched yet (no outer confirmed) we skip the glyph
+               so the canvas doesn't render at (0, 0). -->
+          <template v-if="showBridgeOverlay">
+            <rect
+              v-for="b in bridges"
+              v-show="b.position"
+              :key="b.id"
+              class="added-bridge"
+              :x="(b.position?.[0] ?? 0) - b.width_mm / 2"
+              :y="(b.position?.[1] ?? 0) - overlayScale * 2"
+              :width="b.width_mm"
+              :height="overlayScale * 4"
+            />
+          </template>
+
+          <!-- Edit mode: vertex handles (green dots) for visible LINE entities. -->
+          <template v-if="showEditHandles">
+            <circle
+              v-for="vh in vertexHandles"
+              :key="`${vh.entity_id}#${vh.vertex_index}`"
+              class="vertex-handle"
+              :class="{
+                on:
+                  editSelection &&
+                  editSelection.entity_id === vh.entity_id &&
+                  editSelection.vertex_index === vh.vertex_index,
+              }"
+              :data-entity-id="vh.entity_id"
+              :data-vertex-index="vh.vertex_index"
+              :cx="vh.x"
+              :cy="vh.y"
+              :r="overlayScale * 2.5"
+            />
+            <!-- Drag preview: a ghost circle at the next-position. -->
+            <circle
+              v-if="dragPreview && editSelection"
+              class="vertex-preview"
+              :cx="dragPreview[0]"
+              :cy="dragPreview[1]"
+              :r="overlayScale * 3"
+            />
+          </template>
+
+          <!-- Snap indicator: tiny ring at the snap point (cursor-following). -->
+          <circle
+            v-if="showSnapIndicator && liveCursor"
+            class="snap-ring"
+            :cx="liveCursor[0]"
+            :cy="liveCursor[1]"
+            :r="overlayScale * 3"
+          />
         </g>
       </template>
 
@@ -465,6 +911,38 @@ function onFit() {
       </template>
     </svg>
 
+    <!-- Note text-input modal (Phase 4 — note mode click). Positioned
+         absolutely so it overlays the canvas without disturbing the v3 grid. -->
+    <div v-if="notePendingAnchor" class="note-modal-mask" @click="onNoteCancel">
+      <div class="note-modal" @click.stop>
+        <h6 class="lbl">注記を追加</h6>
+        <p class="ksub">
+          {{ notePendingAnchor[0].toFixed(1) }}, {{ notePendingAnchor[1].toFixed(1) }}
+          ·
+          {{ notePreset === 'roughness' ? '面粗さ' : notePreset === 'welding' ? '溶接' : '一般' }}
+        </p>
+        <input
+          v-model="noteText"
+          type="text"
+          class="note-input"
+          placeholder="例: Ra 3.2 / SS400 t9 / 溶接 PL ×3"
+          autofocus
+          @keydown.enter="onNoteConfirm"
+          @keydown.escape="onNoteCancel"
+        />
+        <div class="action-row">
+          <button class="action-btn" @click="onNoteCancel">キャンセル</button>
+          <button
+            class="action-btn cy"
+            :disabled="!noteText.trim()"
+            @click="onNoteConfirm"
+          >
+            <svg><use href="#i-arrow-right" /></svg>追加
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- bottom-left: meta -->
     <div class="c-meta">
       <span>x <b>{{ cursorX }}</b></span>
@@ -552,4 +1030,116 @@ function onFit() {
 :deep(.chamfer-annotation.bevel) text {
   font-style: italic;
 }
+
+/* Phase 4 — added entities (dim/hole/note/bridge) and edit handles.
+   Each overlay reuses v3 color tokens so the palette stays consistent. */
+:deep(.added-hole) {
+  fill: none;
+  stroke: var(--cy);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+  opacity: 0.95;
+}
+:deep(.dim-preview) {
+  stroke: var(--am);
+  stroke-width: 0.8;
+  stroke-dasharray: 4 3;
+  opacity: 0.7;
+  pointer-events: none;
+}
+:deep(.dim-anchor) {
+  fill: var(--am);
+  stroke: none;
+  pointer-events: none;
+}
+:deep(.note-glyph) {
+  fill: var(--chamfer);
+  font-family: var(--f-mono);
+  stroke: none;
+  pointer-events: none;
+}
+:deep(.note-glyph.note-roughness) { fill: var(--cy); }
+:deep(.note-glyph.note-welding) { fill: var(--am); }
+:deep(.added-bridge) {
+  fill: var(--bg-0);
+  stroke: var(--chamfer);
+  stroke-width: 1;
+  opacity: 0.95;
+  pointer-events: none;
+}
+:deep(.vertex-handle) {
+  fill: var(--ok);
+  stroke: var(--bg-1);
+  stroke-width: 1;
+  cursor: pointer;
+  transition: fill .12s, r .12s;
+}
+:deep(.vertex-handle:hover) {
+  fill: #6aa3ff;
+}
+:deep(.vertex-handle.on) {
+  fill: #6aa3ff;
+  filter: drop-shadow(0 0 4px rgba(106, 163, 255, 0.7));
+}
+:deep(.vertex-preview) {
+  fill: rgba(106, 163, 255, 0.3);
+  stroke: #6aa3ff;
+  stroke-width: 1;
+  pointer-events: none;
+}
+:deep(.snap-ring) {
+  fill: none;
+  stroke: var(--cy);
+  stroke-width: 0.8;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+/* Note text-input modal — anchored mid-canvas, matches v3 .editor cadence
+   (background, border, radius). */
+.note-modal-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 9, 13, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 12;
+}
+.note-modal {
+  width: 320px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  padding: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+.note-modal h6.lbl {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--t-3);
+  margin: 0 0 4px;
+}
+.note-modal .ksub {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-4);
+  margin: 0 0 10px;
+}
+.note-input {
+  width: 100%;
+  height: 32px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--t-1);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 0 10px;
+  outline: none;
+  box-sizing: border-box;
+}
+.note-input:focus { border-color: var(--cy); }
 </style>

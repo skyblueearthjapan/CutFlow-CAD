@@ -38,6 +38,10 @@ services:
       - NODE_ENV=development
       # Docker 上では polling watcher が必要 (vite.config.ts でも有効化)
       - CHOKIDAR_USEPOLLING=true
+      # C2: /api を相対パスで叩く — vite dev サーバが docker network 内の
+      # api サービスへプロキシし、Tailscale Funnel / nginx 配下でも同じ
+      # ベース URL で動作する。
+      - VITE_API_BASE=/api
     command: ["npm", "run", "dev"]
     depends_on:
       - api

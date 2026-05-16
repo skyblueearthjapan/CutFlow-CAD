@@ -20,23 +20,39 @@
 import { computed, ref, shallowRef } from 'vue';
 import * as api from '../services/api';
 import type {
+  AddedHole,
+  Bridge,
   ChamferGeometry,
   ChamferSpec,
   CornerInfo,
   CornerJoin,
   DeleteCategoryKey,
   DeleteCategoryRow,
+  Dimension,
+  DimensionType,
+  DxfExportOptions,
   EdgeInfo,
+  EditedVertex,
   Entity,
   FileData,
+  HolePatternRequest,
+  Note,
+  NotePreset,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
   PdfExportOptions,
   PdfFrameOption,
   Session,
+  SnapResult,
 } from '../types/dxf';
 import { useActiveTool } from './activeTool';
+
+/** Tiny id helper — keeps the client-generated UUID-ish strings consistent
+ *  with what mockSession.ts emits (so a switch live↔mock doesn't churn ids). */
+function makeId(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const _currentSession = ref<Session | null>(null);
 const _currentFileId = ref<string | null>(null);
@@ -84,6 +100,26 @@ const _pdfExportOptions = ref<PdfExportOptions>({
   frame: 'none',
   with_offset: false,
   with_chamfer: false,
+  // C3: Phase 4 overlay defaults are ON so a user that just placed dims/
+  // holes/notes/bridges sees them in the exported file without remembering
+  // to re-tick checkboxes. The Header dropdown auto-disables the checkbox
+  // when the corresponding list is empty so this is harmless when there
+  // is nothing to bake in.
+  with_dimensions: true,
+  with_added_holes: true,
+  with_notes: true,
+  with_bridges: true,
+  with_edits: true,
+});
+/** Same shape for DXF (no frame / material — those are PDF-only). */
+const _dxfExportOptions = ref<DxfExportOptions>({
+  with_offset: false,
+  with_chamfer: false,
+  with_dimensions: true,
+  with_added_holes: true,
+  with_notes: true,
+  with_bridges: true,
+  with_edits: true,
 });
 /** Default chamfer values surfaced in the inspector num-step. C面 size is in
  *  mm (Cn); the bevel angle is in degrees and only applies to ``type='bevel'``
@@ -104,6 +140,58 @@ const _isCleaningFrame = ref(false);
  */
 const _filePickerOpener = ref<(() => void) | null>(null);
 const _folderPickerOpener = ref<(() => void) | null>(null);
+
+/* ------------------- Phase 4 — dim / edit / hole / note / bridge ----------- */
+/** Per-file Phase 4 annotation lists, keyed by file_id. */
+const _dimensionsByFile = shallowRef<Map<string, Dimension[]>>(new Map());
+const _vertexEditsByFile = shallowRef<Map<string, EditedVertex[]>>(new Map());
+const _addedHolesByFile = shallowRef<Map<string, AddedHole[]>>(new Map());
+const _notesByFile = shallowRef<Map<string, Note[]>>(new Map());
+const _bridgesByFile = shallowRef<Map<string, Bridge[]>>(new Map());
+
+/** Dimension tool — UI settings persisted across mode switches.
+ *  ``dimType`` selects which ezdxf renderer the backend invokes when the
+ *  dim is baked into the export — H5 (frontend was previously sending no
+ *  type at all so backend always defaulted to 'linear'). */
+const _dimType = ref<DimensionType>('linear');
+const _dimPrecision = ref<number>(1);
+const _dimArrowSize = ref<number>(3.5);
+/** In-progress dimension placement: first click stored until 2nd lands. */
+const _pendingDimStart = ref<[number, number] | null>(null);
+const _dimTwoPointMode = ref<boolean>(false);
+
+/** Edit tool — UI toggles. */
+const _editSnapEnabled = ref<boolean>(true);
+const _editGridSnap = ref<number>(1);    // mm
+const _editOrtho = ref<boolean>(false);  // toggled by Shift
+const _editSelection = ref<{ entity_id: string; vertex_index: number } | null>(null);
+
+/** Hole tool — diameter + placement / pattern config. */
+const _holeDiameter = ref<number>(9);
+const _holeContinuous = ref<boolean>(false);   // Shift-click sticks the mode
+const _holePatternOpen = ref<boolean>(false);  // "A" key opens the modal
+const _holePatternRows = ref<number>(2);
+const _holePatternCols = ref<number>(3);
+const _holePatternPitchX = ref<number>(40);
+const _holePatternPitchY = ref<number>(40);
+
+/** Note tool — preset + font + pending text modal anchor.
+ *  Backend enum: 'roughness' | 'welding' | 'general' (was 'weld' in the
+ *  legacy mock — C1 renames the wire value). */
+const _notePreset = ref<NotePreset>('general');
+const _noteHeight = ref<number>(2.5);
+const _notePendingAnchor = ref<[number, number] | null>(null);
+
+/** Bridge tool — width + computed recommended count. */
+const _bridgeWidth = ref<number>(2.0);
+const _bridgeRecommended = ref<number>(4);
+
+/** Last snap result (for canvas overlay rendering). */
+const _lastSnap = ref<SnapResult | null>(null);
+const _isAddingDimension = ref(false);
+const _isAddingHole = ref(false);
+const _isAddingNote = ref(false);
+const _isAddingBridge = ref(false);
 
 /** Assembly-drawing filename pattern. Mirror of the server-side regex in
  *  api/routers/session.py — kept in sync manually since duplicating across
@@ -251,6 +339,38 @@ const chamferSpecByCorner = computed<Map<string, ChamferSpec>>(() => {
   return map;
 });
 
+/* --------------------- Phase 4 derived (per-file lists) ------------------- */
+
+const dimensions = computed<Dimension[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _dimensionsByFile.value.get(fid) ?? [];
+});
+
+const vertexEdits = computed<EditedVertex[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _vertexEditsByFile.value.get(fid) ?? [];
+});
+
+const addedHoles = computed<AddedHole[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _addedHolesByFile.value.get(fid) ?? [];
+});
+
+const notes = computed<Note[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _notesByFile.value.get(fid) ?? [];
+});
+
+const bridges = computed<Bridge[]>(() => {
+  const fid = _currentFileId.value;
+  if (!fid) return [];
+  return _bridgesByFile.value.get(fid) ?? [];
+});
+
 /* ----------------------------- Helpers ---------------------------------- */
 
 function setError(msg: string | null) {
@@ -358,11 +478,17 @@ export function useSession() {
     setError(null);
     _isLoadingFile.value = true;
     try {
-      const [data, outer, offset, chamfer] = await Promise.all([
+      const [data, outer, offset, chamfer, dims, holes, notes_, bridges_] = await Promise.all([
         api.getFile(sid, fid),
         api.getOuter(sid, fid).catch(() => null),
         api.getOffset(sid, fid).catch(() => null),
         api.getChamfer(sid, fid).catch(() => null),
+        // Phase 4 — hydrate annotation lists so a tab switch shows existing
+        // dim/hole/note/bridge work without a separate /annotations roundtrip.
+        api.listDimensions(sid, fid).catch(() => [] as Dimension[]),
+        api.listHoles(sid, fid).catch(() => [] as AddedHole[]),
+        api.listNotes(sid, fid).catch(() => [] as Note[]),
+        api.listBridges(sid, fid).catch(() => [] as Bridge[]),
       ]);
       // shallowRef requires assigning a new Map ref to trigger updates.
       const next = new Map(_files.value);
@@ -374,6 +500,10 @@ export function useSession() {
         setMapEntry(_chamferByFile, fid, chamfer.specs);
         setMapEntry(_chamferGeometryByFile, fid, chamfer.geometry);
       }
+      setMapEntry(_dimensionsByFile, fid, dims);
+      setMapEntry(_addedHolesByFile, fid, holes);
+      setMapEntry(_notesByFile, fid, notes_);
+      setMapEntry(_bridgesByFile, fid, bridges_);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'ファイルの読み込みに失敗しました');
     } finally {
@@ -435,17 +565,19 @@ export function useSession() {
     }
   }
 
-  /** Download the cleaned DXF for the active file (no offset). */
+  /** Download the cleaned DXF for the active file (no offset).
+   *  C3: Phase 4 overlay flags ride on the request when the user has
+   *  ticked the corresponding boxes in the dropdown. */
   async function exportDxf(): Promise<void> {
-    await exportDxfInternal(false);
+    await exportDxfInternal({ ..._dxfExportOptions.value, with_offset: false });
   }
 
   /** Download the cleaned DXF with the computed offset embedded. */
   async function exportDxfWithOffset(): Promise<void> {
-    await exportDxfInternal(true);
+    await exportDxfInternal({ ..._dxfExportOptions.value, with_offset: true });
   }
 
-  async function exportDxfInternal(withOffset: boolean): Promise<void> {
+  async function exportDxfInternal(opts: DxfExportOptions): Promise<void> {
     const sid = _currentSession.value?.session_id;
     const fid = _currentFileId.value;
     const file = currentFile.value;
@@ -455,13 +587,31 @@ export function useSession() {
     }
     setError(null);
     try {
-      const blob = await api.exportDxf(sid, fid, withOffset);
+      const blob = await api.exportDxf(sid, fid, opts);
       const base = file.name.replace(/\.[Dd][Xx][Ff]$/, '');
-      const suffix = withOffset ? '_offset' : '_clean';
+      const suffix = opts.with_offset ? '_offset' : '_clean';
       downloadBlob(blob, `${base}${suffix}.dxf`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '書き出しに失敗しました');
     }
+  }
+  function setDxfWithOffset(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_offset: on };
+  }
+  function setDxfWithDimensions(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_dimensions: on };
+  }
+  function setDxfWithAddedHoles(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_added_holes: on };
+  }
+  function setDxfWithNotes(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_notes: on };
+  }
+  function setDxfWithBridges(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_bridges: on };
+  }
+  function setDxfWithEdits(on: boolean): void {
+    _dxfExportOptions.value = { ..._dxfExportOptions.value, with_edits: on };
   }
 
   /* -------------------- Phase 2 — outer / offset actions ----------------- */
@@ -761,6 +911,21 @@ export function useSession() {
   function setPdfWithChamfer(on: boolean): void {
     _pdfExportOptions.value = { ..._pdfExportOptions.value, with_chamfer: on };
   }
+  function setPdfWithDimensions(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_dimensions: on };
+  }
+  function setPdfWithAddedHoles(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_added_holes: on };
+  }
+  function setPdfWithNotes(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_notes: on };
+  }
+  function setPdfWithBridges(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_bridges: on };
+  }
+  function setPdfWithEdits(on: boolean): void {
+    _pdfExportOptions.value = { ..._pdfExportOptions.value, with_edits: on };
+  }
   /** Update the optional material string that lands on the PDF header (H4). */
   function setPdfMaterial(text: string): void {
     _pdfMaterial.value = text;
@@ -793,6 +958,300 @@ export function useSession() {
     }
   }
 
+  /* -------------------- Phase 4 — annotation actions --------------------- */
+
+  /** Refresh all five Phase 4 lists for the active file. */
+  async function loadAnnotations(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      const [dims, holes, notes_, bridges_, edits_] = await Promise.all([
+        api.listDimensions(sid, fid).catch(() => [] as Dimension[]),
+        api.listHoles(sid, fid).catch(() => [] as AddedHole[]),
+        api.listNotes(sid, fid).catch(() => [] as Note[]),
+        api.listBridges(sid, fid).catch(() => [] as Bridge[]),
+        api.listEdits(sid, fid).catch(() => [] as EditedVertex[]),
+      ]);
+      setMapEntry(_dimensionsByFile, fid, dims);
+      setMapEntry(_addedHolesByFile, fid, holes);
+      setMapEntry(_notesByFile, fid, notes_);
+      setMapEntry(_bridgesByFile, fid, bridges_);
+      setMapEntry(_vertexEditsByFile, fid, edits_);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '注釈情報の取得に失敗しました');
+    }
+  }
+
+  /** Dimension: append after a 2-point click. */
+  async function addDimension(p1: [number, number], p2: [number, number]): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    _isAddingDimension.value = true;
+    try {
+      const dim: Dimension = {
+        id: makeId('dim'),
+        type: _dimType.value,
+        p1,
+        p2,
+        style: 'iso',
+      };
+      // Backend is last-write-wins for the list; just send current + new.
+      const next = await api.addDimension(sid, fid, dim);
+      setMapEntry(_dimensionsByFile, fid, next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '寸法の追加に失敗しました');
+    } finally {
+      _isAddingDimension.value = false;
+    }
+  }
+
+  async function removeDimension(id: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      await api.removeDimension(sid, fid, id);
+      const list = _dimensionsByFile.value.get(fid) ?? [];
+      setMapEntry(_dimensionsByFile, fid, list.filter((d) => d.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '寸法の削除に失敗しました');
+    }
+  }
+
+  function setDimPrecision(n: number): void {
+    if (!Number.isFinite(n)) return;
+    _dimPrecision.value = Math.max(0, Math.min(4, Math.round(n)));
+  }
+  function setDimType(t: DimensionType): void { _dimType.value = t; }
+  function setDimTwoPointMode(on: boolean): void { _dimTwoPointMode.value = on; }
+  function setPendingDimStart(p: [number, number] | null): void { _pendingDimStart.value = p; }
+
+  /** Edit: snap a cursor coord then commit the vertex translation. */
+  async function snapPoint(cursor: [number, number]): Promise<SnapResult> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) {
+      const fallback: SnapResult = { snapped: cursor, type: null };
+      _lastSnap.value = fallback;
+      return fallback;
+    }
+    try {
+      const r = await api.getSnapPoint(sid, fid, cursor);
+      _lastSnap.value = r;
+      return r;
+    } catch {
+      const fallback: SnapResult = { snapped: cursor, type: null };
+      _lastSnap.value = fallback;
+      return fallback;
+    }
+  }
+
+  async function applyVertexEdit(
+    entity_id: string,
+    vertex_index: number,
+    _original: [number, number],
+    position: [number, number],
+  ): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      const merged = await api.editVertex(sid, fid, {
+        entity_id,
+        vertex_index,
+        new_position: position,
+      });
+      setMapEntry(_vertexEditsByFile, fid, merged);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '頂点編集に失敗しました');
+    }
+  }
+
+  function selectEditTarget(entity_id: string | null, vertex_index = 0): void {
+    _editSelection.value = entity_id ? { entity_id, vertex_index } : null;
+  }
+  function setEditSnap(on: boolean): void { _editSnapEnabled.value = on; }
+  function setEditOrtho(on: boolean): void { _editOrtho.value = on; }
+
+  /** Hole: append at the given centre using the current diameter. */
+  async function addHole(position: [number, number]): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    _isAddingHole.value = true;
+    try {
+      const hole: AddedHole = {
+        id: makeId('h'),
+        position,
+        diameter: _holeDiameter.value,
+      };
+      const next = await api.addHole(sid, fid, hole);
+      setMapEntry(_addedHolesByFile, fid, next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '穴の追加に失敗しました');
+    } finally {
+      _isAddingHole.value = false;
+    }
+  }
+
+  async function addHolePattern(anchor: [number, number]): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    const req: HolePatternRequest = {
+      anchor,
+      rows: _holePatternRows.value,
+      cols: _holePatternCols.value,
+      spacing: [_holePatternPitchX.value, _holePatternPitchY.value],
+      diameter: _holeDiameter.value,
+    };
+    _isAddingHole.value = true;
+    try {
+      const merged = await api.addHolePattern(sid, fid, req);
+      setMapEntry(_addedHolesByFile, fid, merged);
+      _holePatternOpen.value = false;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '整列穴の追加に失敗しました');
+    } finally {
+      _isAddingHole.value = false;
+    }
+  }
+
+  async function removeHole(id: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      await api.removeHole(sid, fid, id);
+      const list = _addedHolesByFile.value.get(fid) ?? [];
+      setMapEntry(_addedHolesByFile, fid, list.filter((h) => h.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '穴の削除に失敗しました');
+    }
+  }
+
+  function setHoleDiameter(d: number): void {
+    if (!Number.isFinite(d)) return;
+    _holeDiameter.value = Math.max(0.5, Math.min(200, Number(d.toFixed(2))));
+  }
+  function setHoleContinuous(on: boolean): void { _holeContinuous.value = on; }
+  function setHolePatternOpen(on: boolean): void { _holePatternOpen.value = on; }
+
+  /** Note: append at the given anchor with text + current preset/height.
+   *  Backend uses ``font_size_mm`` (was ``height`` in the legacy client). */
+  async function addNote(
+    position: [number, number],
+    text: string,
+    preset?: NotePreset,
+  ): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid || !text.trim()) return;
+    _isAddingNote.value = true;
+    try {
+      const note: Note = {
+        id: makeId('n'),
+        position,
+        text: text.trim(),
+        preset: preset ?? _notePreset.value,
+        font_size_mm: _noteHeight.value,
+      };
+      const merged = await api.addNote(sid, fid, note);
+      setMapEntry(_notesByFile, fid, merged);
+      _notePendingAnchor.value = null;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '注記の追加に失敗しました');
+    } finally {
+      _isAddingNote.value = false;
+    }
+  }
+
+  async function removeNote(id: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      await api.removeNote(sid, fid, id);
+      const list = _notesByFile.value.get(fid) ?? [];
+      setMapEntry(_notesByFile, fid, list.filter((n) => n.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '注記の削除に失敗しました');
+    }
+  }
+
+  function setNotePreset(p: NotePreset): void { _notePreset.value = p; }
+  function setNotePendingAnchor(p: [number, number] | null): void { _notePendingAnchor.value = p; }
+
+  /** Bridge: append at the given position_ratio on the given outer edge.
+   *  C1: backend identifies a bridge by ``(edge_id, position_ratio)`` —
+   *  callers that have an XY anchor must convert it to ratio first
+   *  (CanvasArea.vue does this once it picked which edge was clicked). */
+  async function addBridge(
+    edge_id: string,
+    position_ratio: number,
+  ): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    _isAddingBridge.value = true;
+    try {
+      const bridge: Bridge = {
+        id: makeId('b'),
+        edge_id,
+        position_ratio: Math.max(0, Math.min(1, position_ratio)),
+        width_mm: _bridgeWidth.value,
+      };
+      const merged = await api.addBridge(sid, fid, bridge);
+      setMapEntry(_bridgesByFile, fid, merged);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ブリッジの追加に失敗しました');
+    } finally {
+      _isAddingBridge.value = false;
+    }
+  }
+
+  async function addBridgeAuto(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    _isAddingBridge.value = true;
+    try {
+      // H7: backend ``/bridges/auto`` REPLACES the full list — we set
+      // the entire returned array so manual entries placed before auto
+      // are also dropped (matches what the server did silently before).
+      const next = await api.addBridgeAuto(sid, fid, _bridgeRecommended.value, _bridgeWidth.value);
+      setMapEntry(_bridgesByFile, fid, next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ブリッジ自動配置に失敗しました');
+    } finally {
+      _isAddingBridge.value = false;
+    }
+  }
+
+  async function removeBridge(id: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      await api.removeBridge(sid, fid, id);
+      const list = _bridgesByFile.value.get(fid) ?? [];
+      setMapEntry(_bridgesByFile, fid, list.filter((b) => b.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ブリッジの削除に失敗しました');
+    }
+  }
+
+  function setBridgeWidth(w: number): void {
+    if (!Number.isFinite(w)) return;
+    _bridgeWidth.value = Math.max(0.5, Math.min(20, Number(w.toFixed(2))));
+  }
+  function setBridgeRecommended(n: number): void {
+    if (!Number.isFinite(n)) return;
+    _bridgeRecommended.value = Math.max(1, Math.min(20, Math.round(n)));
+  }
+
   return {
     // state
     currentSession: _currentSession,
@@ -815,6 +1274,7 @@ export function useSession() {
     cornerJoin: _cornerJoin,
     // Phase 3 state
     pdfExportOptions: _pdfExportOptions,
+    dxfExportOptions: _dxfExportOptions,
     pdfMaterial: _pdfMaterial,
     chamferDefaultSize: _chamferDefaultSize,
     chamferDefaultAngle: _chamferDefaultAngle,
@@ -871,8 +1331,80 @@ export function useSession() {
     setPdfFrameOption,
     setPdfWithOffset,
     setPdfWithChamfer,
+    setPdfWithDimensions,
+    setPdfWithAddedHoles,
+    setPdfWithNotes,
+    setPdfWithBridges,
+    setPdfWithEdits,
+    setDxfWithOffset,
+    setDxfWithDimensions,
+    setDxfWithAddedHoles,
+    setDxfWithNotes,
+    setDxfWithBridges,
+    setDxfWithEdits,
     setPdfMaterial,
     exportPdf,
+    // Phase 4 state
+    dimType: _dimType,
+    dimPrecision: _dimPrecision,
+    dimArrowSize: _dimArrowSize,
+    pendingDimStart: _pendingDimStart,
+    dimTwoPointMode: _dimTwoPointMode,
+    editSnapEnabled: _editSnapEnabled,
+    editGridSnap: _editGridSnap,
+    editOrtho: _editOrtho,
+    editSelection: _editSelection,
+    holeDiameter: _holeDiameter,
+    holeContinuous: _holeContinuous,
+    holePatternOpen: _holePatternOpen,
+    holePatternRows: _holePatternRows,
+    holePatternCols: _holePatternCols,
+    holePatternPitchX: _holePatternPitchX,
+    holePatternPitchY: _holePatternPitchY,
+    notePreset: _notePreset,
+    noteHeight: _noteHeight,
+    notePendingAnchor: _notePendingAnchor,
+    bridgeWidth: _bridgeWidth,
+    bridgeRecommended: _bridgeRecommended,
+    lastSnap: _lastSnap,
+    isAddingDimension: _isAddingDimension,
+    isAddingHole: _isAddingHole,
+    isAddingNote: _isAddingNote,
+    isAddingBridge: _isAddingBridge,
+    // Phase 4 derived
+    dimensions,
+    vertexEdits,
+    addedHoles,
+    notes,
+    bridges,
+    // Phase 4 actions
+    loadAnnotations,
+    addDimension,
+    removeDimension,
+    setDimType,
+    setDimPrecision,
+    setDimTwoPointMode,
+    setPendingDimStart,
+    snapPoint,
+    applyVertexEdit,
+    selectEditTarget,
+    setEditSnap,
+    setEditOrtho,
+    addHole,
+    addHolePattern,
+    removeHole,
+    setHoleDiameter,
+    setHoleContinuous,
+    setHolePatternOpen,
+    addNote,
+    removeNote,
+    setNotePreset,
+    setNotePendingAnchor,
+    addBridge,
+    addBridgeAuto,
+    removeBridge,
+    setBridgeWidth,
+    setBridgeRecommended,
     clearError: () => setError(null),
     // picker plumbing (M4)
     registerFilePicker,

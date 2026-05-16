@@ -21,7 +21,7 @@
 import { computed, ref, watch } from 'vue';
 import { useActiveTool, toolMeta } from '../stores/activeTool';
 import { useSession } from '../stores/session';
-import type { ChamferSpec, Entity } from '../types/dxf';
+import type { ChamferSpec, DimensionType, Entity, NotePreset } from '../types/dxf';
 
 const { activeTool } = useActiveTool();
 const {
@@ -71,6 +71,46 @@ const {
   setChamferDefaultSize,
   setChamferDefaultAngle,
   cleanupFrame,
+  // Phase 4
+  dimensions,
+  vertexEdits,
+  addedHoles,
+  notes,
+  bridges,
+  dimType,
+  dimPrecision,
+  dimArrowSize,
+  dimTwoPointMode,
+  editSnapEnabled,
+  editOrtho,
+  editSelection,
+  holeDiameter,
+  holeContinuous,
+  holePatternOpen,
+  holePatternRows,
+  holePatternCols,
+  holePatternPitchX,
+  holePatternPitchY,
+  notePreset,
+  noteHeight,
+  bridgeWidth,
+  bridgeRecommended,
+  setDimPrecision,
+  setDimType,
+  removeDimension,
+  setHoleDiameter,
+  setHoleContinuous,
+  setHolePatternOpen,
+  addHolePattern,
+  removeHole,
+  setNotePreset,
+  removeNote,
+  setBridgeWidth,
+  setBridgeRecommended,
+  addBridgeAuto,
+  removeBridge,
+  setEditSnap,
+  setEditOrtho,
 } = useSession();
 
 const meta = computed(() => toolMeta[activeTool.value]);
@@ -404,6 +444,139 @@ watch(
   },
 );
 
+/* -------------------- Phase 4 — pill text + helpers --------------------- */
+
+/** Pill text for each Phase 4 tool. Counts come from the live store lists. */
+const dimPillText = computed(() => `${dimensions.value.length} 件`);
+const dimPillCls = computed(() =>
+  dimTwoPointMode.value ? 'cy' : dimensions.value.length > 0 ? 'ok' : 'gh',
+);
+const editPillText = computed(() =>
+  editSelection.value ? '選択 1' : `${vertexEdits.value.length} 編集`,
+);
+const editPillCls = computed(() => (editSelection.value ? 'cy' : 'gh'));
+const holePillText = computed(() => `+${addedHoles.value.length}`);
+const holePillCls = computed(() => (addedHoles.value.length > 0 ? 'ok' : 'gh'));
+const notePillText = computed(() => `${notes.value.length} 件`);
+const notePillCls = computed(() => (notes.value.length > 0 ? 'ok' : 'gh'));
+const bridgePillText = computed(
+  () => `${bridges.value.length} / ${bridgeRecommended.value}`,
+);
+const bridgePillCls = computed(() =>
+  bridges.value.length >= bridgeRecommended.value && bridges.value.length > 0 ? 'ok' : 'gh',
+);
+
+/* dim — num-step + 2-clear keyboard */
+function bumpDimPrecision(d: number) { setDimPrecision(dimPrecision.value + d); }
+function onDimPrecisionInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setDimPrecision(n);
+}
+
+/** Cycle through the four dim types — H5: backend rejects an unknown
+ *  type, so we constrain to its enum here. Diameter / radius work best
+ *  when the operator's first click hits the circle centre and the
+ *  second click lands on the rim. */
+const DIM_TYPES: DimensionType[] = ['linear', 'aligned', 'diameter', 'radius'];
+const DIM_TYPE_LABEL: Record<DimensionType, string> = {
+  linear: '水平/垂直 (linear)',
+  aligned: '平行 (aligned)',
+  diameter: '直径 (diameter)',
+  radius: '半径 (radius)',
+};
+function cycleDimType() {
+  const i = DIM_TYPES.indexOf(dimType.value);
+  setDimType(DIM_TYPES[(i + 1) % DIM_TYPES.length]);
+}
+function fmtCoord(p: [number, number]) {
+  return `${p[0].toFixed(1)}, ${p[1].toFixed(1)}`;
+}
+function dimLength(p1: [number, number], p2: [number, number]) {
+  return Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+}
+
+/* edit — toggles */
+function toggleEditSnap() { setEditSnap(!editSnapEnabled.value); }
+function toggleEditOrtho() { setEditOrtho(!editOrtho.value); }
+
+/* hole — num-step on diameter (accepts "φ9.0" or "9") */
+const HOLE_STEP = 0.5;
+function bumpHole(d: number) { setHoleDiameter(holeDiameter.value + d); }
+function onHoleInput(e: Event) {
+  const raw = (e.target as HTMLInputElement).value.replace(/^φ/, '').trim();
+  const n = Number(raw);
+  if (Number.isFinite(n)) setHoleDiameter(n);
+}
+
+/** Pattern modal — confirm uses the bbox centre as origin so the row/col grid
+ *  lands inside the visible drawing. Operators tweak position via canvas
+ *  click later (M6). */
+function onConfirmPattern() {
+  const f = currentFile.value;
+  if (!f) return;
+  const cx = (f.bounding_box.min_x + f.bounding_box.max_x) / 2;
+  const cy = (f.bounding_box.min_y + f.bounding_box.max_y) / 2;
+  // Centre the grid on the bbox centre.
+  const ox = cx - (holePatternCols.value - 1) * holePatternPitchX.value / 2;
+  const oy = cy - (holePatternRows.value - 1) * holePatternPitchY.value / 2;
+  addHolePattern([ox, oy]);
+}
+
+/* note — preset cycling (mockup's '面粗さ / 溶接 / 一般' string is read-only;
+ * we offer a click-to-cycle pill so the underlying preset becomes meaningful
+ * without breaking the v3 layout). */
+const NOTE_PRESETS: NotePreset[] = ['roughness', 'welding', 'general'];
+const NOTE_PRESET_LABEL: Record<NotePreset, string> = {
+  roughness: '面粗さ',
+  welding: '溶接',
+  general: '一般',
+};
+function cycleNotePreset() {
+  const i = NOTE_PRESETS.indexOf(notePreset.value);
+  const next = NOTE_PRESETS[(i + 1) % NOTE_PRESETS.length];
+  setNotePreset(next);
+}
+
+/* bridge — width num-step */
+const BRIDGE_STEP = 0.5;
+function bumpBridge(d: number) { setBridgeWidth(bridgeWidth.value + d); }
+function onBridgeInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setBridgeWidth(n);
+}
+function bumpBridgeRec(d: number) { setBridgeRecommended(bridgeRecommended.value + d); }
+
+/* hole pattern handlers — explicit setters keep the template tidy and avoid
+ * relying on template-side ref auto-unwrap for assignment expressions. */
+function setHolePatternRows(n: number) {
+  if (!Number.isFinite(n)) return;
+  holePatternRows.value = Math.max(1, Math.min(50, Math.round(n)));
+}
+function setHolePatternCols(n: number) {
+  if (!Number.isFinite(n)) return;
+  holePatternCols.value = Math.max(1, Math.min(50, Math.round(n)));
+}
+function setHolePatternPitchX(n: number) {
+  if (!Number.isFinite(n)) return;
+  holePatternPitchX.value = Math.max(1, Math.min(500, n));
+}
+function setHolePatternPitchY(n: number) {
+  if (!Number.isFinite(n)) return;
+  holePatternPitchY.value = Math.max(1, Math.min(500, n));
+}
+function onPatternRowsInput(e: Event) {
+  setHolePatternRows(Number((e.target as HTMLInputElement).value));
+}
+function onPatternColsInput(e: Event) {
+  setHolePatternCols(Number((e.target as HTMLInputElement).value));
+}
+function onPatternPitchXInput(e: Event) {
+  setHolePatternPitchX(Number((e.target as HTMLInputElement).value));
+}
+function onPatternPitchYInput(e: Event) {
+  setHolePatternPitchY(Number((e.target as HTMLInputElement).value));
+}
+
 /** Re-load corners when the active file changes (in case the user was already
  *  in chamfer mode and switched tabs). */
 watch(
@@ -426,7 +599,21 @@ watch(
       </div>
       <span
         class="pill tpill"
-        :class="activeTool === 'outer' ? outerPillCls : meta.pill.cls"
+        :class="
+          activeTool === 'outer'
+            ? outerPillCls
+            : activeTool === 'dim'
+            ? dimPillCls
+            : activeTool === 'edit'
+            ? editPillCls
+            : activeTool === 'hole'
+            ? holePillCls
+            : activeTool === 'note'
+            ? notePillCls
+            : activeTool === 'bridge'
+            ? bridgePillCls
+            : meta.pill.cls
+        "
       >{{
         activeTool === 'delete'
           ? deletePillText
@@ -436,6 +623,16 @@ watch(
           ? offsetPillText
           : activeTool === 'chamfer'
           ? chamferPillText
+          : activeTool === 'dim'
+          ? dimPillText
+          : activeTool === 'edit'
+          ? editPillText
+          : activeTool === 'hole'
+          ? holePillText
+          : activeTool === 'note'
+          ? notePillText
+          : activeTool === 'bridge'
+          ? bridgePillText
           : meta.pill.text
       }}</span>
     </div>
@@ -911,7 +1108,7 @@ watch(
         </div>
       </template>
 
-      <!-- ========== dim ========== -->
+      <!-- ========== dim (Phase 4) ========== -->
       <template v-else-if="activeTool === 'dim'">
         <div class="section-block">
           <p class="lead">
@@ -922,33 +1119,81 @@ watch(
             <div><div class="k">スタイル</div><div class="ksub">DIM-STYLE</div></div>
             <span class="v">ISO 標準</span>
           </div>
+          <!-- H5: dimension type selector — backend defaults to 'linear'
+               when omitted, so exposing it here lets the operator pick
+               diameter / radius / aligned for circular features etc. -->
+          <div class="kv">
+            <div><div class="k">種別</div><div class="ksub">DIM-TYPE</div></div>
+            <span class="v" style="cursor:pointer" @click="cycleDimType">
+              {{ DIM_TYPE_LABEL[dimType] }}
+            </span>
+          </div>
           <div class="kv">
             <div><div class="k">小数桁</div><div class="ksub">PRECISION</div></div>
             <div class="num-step">
-              <button>−</button>
-              <input type="text" value="1" />
+              <button :disabled="!currentFile" @click="bumpDimPrecision(-1)">−</button>
+              <input
+                type="text"
+                :value="dimPrecision"
+                @change="onDimPrecisionInput"
+              />
               <span class="unit">桁</span>
-              <button>+</button>
+              <button :disabled="!currentFile" @click="bumpDimPrecision(1)">+</button>
             </div>
           </div>
           <div class="kv">
             <div><div class="k">矢印サイズ</div><div class="ksub">ARROW-SIZE</div></div>
-            <span class="v">3.5 mm</span>
+            <span class="v">{{ dimArrowSize.toFixed(1) }} mm</span>
           </div>
         </div>
 
-        <div class="placeholder-card">
+        <div v-if="dimensions.length === 0" class="placeholder-card">
           <div class="ic"><svg><use href="#i-dim" /></svg></div>
           <h5>寸法を追加するには</h5>
           <p>
             キャンバスで 2 点をクリックすると、その間の寸法線がここに表示されます。<br />
             キーボード <b style="color:var(--t-2)">D</b> で2点間モード。
           </p>
-          <span class="meta">追加済み 0 件</span>
+          <span class="meta">
+            {{ dimTwoPointMode ? '2点間モード — 1点目を指定' : '追加済み 0 件' }}
+          </span>
+        </div>
+        <div v-else class="section-block">
+          <h6 class="lbl">追加済み <span class="right">クリック で 削除</span></h6>
+          <div class="edge-list">
+            <div
+              v-for="(d, i) in dimensions"
+              :key="d.id"
+              class="edge-row"
+              style="cursor:default"
+            >
+              <span class="ix">D{{ i + 1 }}</span>
+              <div>
+                <div class="nm">{{ d.text_override ?? dimLength(d.p1, d.p2).toFixed(dimPrecision) + ' mm' }}</div>
+                <div class="ns">{{ fmtCoord(d.p1) }} → {{ fmtCoord(d.p2) }}</div>
+              </div>
+              <button
+                class="row-x"
+                title="削除"
+                @click="removeDimension(d.id)"
+              >×</button>
+            </div>
+          </div>
+          <div
+            v-if="dimTwoPointMode"
+            class="warn-strip"
+            style="margin-top:10px;background:var(--cy-soft);color:var(--cy);border:1px solid rgba(77,207,224,0.25)"
+          >
+            <svg style="fill:var(--cy)"><use href="#i-warning" /></svg>
+            <div>
+              <b style="color:var(--cy)">2点間モード</b><br />
+              キャンバスで 1点目 → 2点目 をクリックして寸法を確定します。
+            </div>
+          </div>
         </div>
       </template>
 
-      <!-- ========== edit ========== -->
+      <!-- ========== edit (Phase 4) ========== -->
       <template v-else-if="activeTool === 'edit'">
         <div class="section-block">
           <p class="lead">
@@ -957,7 +1202,9 @@ watch(
 
           <div class="kv">
             <div><div class="k">スナップ</div><div class="ksub">SNAP</div></div>
-            <span class="v">端点 + 中点 + 交点</span>
+            <span class="v" style="cursor:pointer" @click="toggleEditSnap">
+              {{ editSnapEnabled ? '端点 + 中点 + 交点' : 'OFF' }}
+            </span>
           </div>
           <div class="kv">
             <div><div class="k">グリッド吸着</div><div class="ksub">GRID-SNAP</div></div>
@@ -965,22 +1212,49 @@ watch(
           </div>
           <div class="kv">
             <div><div class="k">直交モード</div><div class="ksub">ORTHO</div></div>
-            <span class="v">OFF (Shift)</span>
+            <span class="v" style="cursor:pointer" @click="toggleEditOrtho">
+              {{ editOrtho ? 'ON' : 'OFF' }} (Shift)
+            </span>
           </div>
         </div>
 
-        <div class="placeholder-card">
+        <div v-if="!editSelection" class="placeholder-card">
           <div class="ic"><svg><use href="#i-edit-line" /></svg></div>
           <h5>線を選択してください</h5>
           <p>
             キャンバス上の <b style="color:var(--t-2)">頂点</b> または <b style="color:var(--t-2)">線分</b>
             をクリックすると、ここに座標・長さ・角度が表示され、ドラッグで編集できます。
           </p>
-          <span class="meta">選択 0 / 162 entities</span>
+          <span class="meta">
+            選択 0 / {{ currentFile?.entities.length ?? 0 }} entities
+            <template v-if="vertexEdits.length > 0"> · 編集済み {{ vertexEdits.length }} 件</template>
+          </span>
+        </div>
+        <div v-else class="section-block">
+          <h6 class="lbl">選択中 <span class="right">ドラッグ で 移動</span></h6>
+          <div class="kv">
+            <div><div class="k">エンティティ</div><div class="ksub">ENTITY-ID</div></div>
+            <span class="v" style="font-size:10.5px">{{ editSelection.entity_id }}</span>
+          </div>
+          <div class="kv">
+            <div><div class="k">頂点</div><div class="ksub">VERTEX-INDEX</div></div>
+            <span class="v">#{{ editSelection.vertex_index }}</span>
+          </div>
+          <div
+            v-if="vertexEdits.length > 0"
+            class="warn-strip"
+            style="margin-top:10px;background:var(--cy-soft);color:var(--cy);border:1px solid rgba(77,207,224,0.25)"
+          >
+            <svg style="fill:var(--cy)"><use href="#i-warning" /></svg>
+            <div>
+              <b style="color:var(--cy)">編集済み {{ vertexEdits.length }} 件</b><br />
+              書き出し時にDXFへ反映されます。
+            </div>
+          </div>
         </div>
       </template>
 
-      <!-- ========== hole ========== -->
+      <!-- ========== hole (Phase 4) ========== -->
       <template v-else-if="activeTool === 'hole'">
         <div class="section-block">
           <p class="lead">
@@ -990,15 +1264,21 @@ watch(
           <div class="kv">
             <div><div class="k">穴径</div><div class="ksub">DIAMETER</div></div>
             <div class="num-step">
-              <button>−</button>
-              <input type="text" value="φ9.0" />
+              <button :disabled="!currentFile" @click="bumpHole(-HOLE_STEP)">−</button>
+              <input
+                type="text"
+                :value="`φ${holeDiameter.toFixed(1)}`"
+                @change="onHoleInput"
+              />
               <span class="unit">mm</span>
-              <button>+</button>
+              <button :disabled="!currentFile" @click="bumpHole(HOLE_STEP)">+</button>
             </div>
           </div>
           <div class="kv">
             <div><div class="k">配置方式</div><div class="ksub">PLACEMENT</div></div>
-            <span class="v">クリックで配置</span>
+            <span class="v" style="cursor:pointer" @click="setHoleContinuous(!holeContinuous)">
+              {{ holeContinuous ? '連続配置 (Shift)' : 'クリックで配置' }}
+            </span>
           </div>
           <div class="kv">
             <div><div class="k">タップ指示</div><div class="ksub">TAP-NOTE</div></div>
@@ -1006,18 +1286,66 @@ watch(
           </div>
         </div>
 
-        <div class="placeholder-card">
+        <!-- Pattern modal — opened by "A" key (App.vue) or button below. -->
+        <div v-if="holePatternOpen" class="section-block">
+          <h6 class="lbl">整列パターン <span class="right">行 × 列 + 間隔</span></h6>
+          <div class="kv">
+            <div><div class="k">行 × 列</div><div class="ksub">ROWS · COLS</div></div>
+            <div class="num-step">
+              <button @click="setHolePatternRows(holePatternRows - 1)">−</button>
+              <input type="text" :value="holePatternRows" @change="onPatternRowsInput" />
+              <span class="unit">×</span>
+              <input type="text" :value="holePatternCols" @change="onPatternColsInput" />
+              <button @click="setHolePatternCols(holePatternCols + 1)">+</button>
+            </div>
+          </div>
+          <div class="kv">
+            <div><div class="k">間隔 X / Y</div><div class="ksub">PITCH-XY</div></div>
+            <div class="num-step">
+              <input type="text" :value="holePatternPitchX.toFixed(1)" @change="onPatternPitchXInput" />
+              <span class="unit">/</span>
+              <input type="text" :value="holePatternPitchY.toFixed(1)" @change="onPatternPitchYInput" />
+              <span class="unit">mm</span>
+            </div>
+          </div>
+          <div class="action-row">
+            <button class="action-btn" @click="setHolePatternOpen(false)">キャンセル</button>
+            <button class="action-btn cy" :disabled="!currentFile" @click="onConfirmPattern">
+              <svg><use href="#i-arrow-right" /></svg>追加
+            </button>
+          </div>
+        </div>
+
+        <div v-if="addedHoles.length === 0 && !holePatternOpen" class="placeholder-card">
           <div class="ic"><svg><use href="#i-hole-add" /></svg></div>
           <h5>キャンバスをクリックして配置</h5>
           <p>
-            カーソル位置に <b style="color:var(--t-2)">φ9.0</b> の穴が追加されます。<br />
+            カーソル位置に <b style="color:var(--t-2)">φ{{ holeDiameter.toFixed(1) }}</b> の穴が追加されます。<br />
             連続配置: Shift+クリック、整列パターン: <b style="color:var(--t-2)">A</b>
           </p>
           <span class="meta">追加済み 0 件</span>
         </div>
+        <div v-else-if="addedHoles.length > 0" class="section-block">
+          <h6 class="lbl">追加済み <span class="right">クリック で 削除</span></h6>
+          <div class="edge-list">
+            <div
+              v-for="(h, i) in addedHoles"
+              :key="h.id"
+              class="edge-row"
+              style="cursor:default"
+            >
+              <span class="ix">H{{ i + 1 }}</span>
+              <div>
+                <div class="nm">φ{{ h.diameter.toFixed(1) }}</div>
+                <div class="ns">{{ fmtCoord(h.position) }}</div>
+              </div>
+              <button class="row-x" title="削除" @click="removeHole(h.id)">×</button>
+            </div>
+          </div>
+        </div>
       </template>
 
-      <!-- ========== note ========== -->
+      <!-- ========== note (Phase 4) ========== -->
       <template v-else-if="activeTool === 'note'">
         <div class="section-block">
           <p class="lead">
@@ -1026,15 +1354,17 @@ watch(
 
           <div class="kv">
             <div><div class="k">プリセット</div><div class="ksub">NOTE-PRESET</div></div>
-            <span class="v">面粗さ / 溶接 / 一般</span>
+            <span class="v" style="cursor:pointer" @click="cycleNotePreset">
+              {{ NOTE_PRESET_LABEL[notePreset] }}
+            </span>
           </div>
           <div class="kv">
             <div><div class="k">フォント</div><div class="ksub">FONT</div></div>
-            <span class="v">isocp · 2.5 mm</span>
+            <span class="v">isocp · {{ noteHeight.toFixed(1) }} mm</span>
           </div>
         </div>
 
-        <div class="placeholder-card">
+        <div v-if="notes.length === 0" class="placeholder-card">
           <div class="ic"><svg><use href="#i-note" /></svg></div>
           <h5>注記はまだありません</h5>
           <p>
@@ -1043,9 +1373,27 @@ watch(
           </p>
           <span class="meta">注記 0 件</span>
         </div>
+        <div v-else class="section-block">
+          <h6 class="lbl">追加済み <span class="right">クリック で 削除</span></h6>
+          <div class="edge-list">
+            <div
+              v-for="(n, i) in notes"
+              :key="n.id"
+              class="edge-row"
+              style="cursor:default"
+            >
+              <span class="ix">N{{ i + 1 }}</span>
+              <div>
+                <div class="nm">{{ n.text }}</div>
+                <div class="ns">{{ NOTE_PRESET_LABEL[n.preset] }} · {{ fmtCoord(n.position) }}</div>
+              </div>
+              <button class="row-x" title="削除" @click="removeNote(n.id)">×</button>
+            </div>
+          </div>
+        </div>
       </template>
 
-      <!-- ========== bridge ========== -->
+      <!-- ========== bridge (Phase 4) ========== -->
       <template v-else-if="activeTool === 'bridge'">
         <div class="section-block">
           <p class="lead">
@@ -1055,31 +1403,104 @@ watch(
           <div class="kv">
             <div><div class="k">ブリッジ幅</div><div class="ksub">BRIDGE-WIDTH</div></div>
             <div class="num-step">
-              <button>−</button>
-              <input type="text" value="2.0" />
+              <button :disabled="!currentFile" @click="bumpBridge(-BRIDGE_STEP)">−</button>
+              <input
+                type="text"
+                :value="bridgeWidth.toFixed(1)"
+                @change="onBridgeInput"
+              />
               <span class="unit">mm</span>
-              <button>+</button>
+              <button :disabled="!currentFile" @click="bumpBridge(BRIDGE_STEP)">+</button>
             </div>
           </div>
           <div class="kv">
             <div><div class="k">推奨個数</div><div class="ksub">AUTO-COUNT</div></div>
-            <span class="v">4 (重量より算出)</span>
+            <div class="num-step">
+              <button :disabled="!currentFile" @click="bumpBridgeRec(-1)">−</button>
+              <input type="text" :value="bridgeRecommended" readonly />
+              <span class="unit">個</span>
+              <button :disabled="!currentFile" @click="bumpBridgeRec(1)">+</button>
+            </div>
           </div>
           <div class="kv">
             <div><div class="k">配置方式</div><div class="ksub">PLACEMENT</div></div>
-            <span class="v">等間隔 (自動)</span>
+            <span class="v">外径クリック / 自動</span>
           </div>
         </div>
 
-        <div class="placeholder-card">
+        <div v-if="bridges.length === 0" class="placeholder-card">
           <div class="ic"><svg><use href="#i-bridge" /></svg></div>
           <h5>外径をクリックして配置</h5>
           <p>
-            キャンバス上の外径線をクリックすると、その位置に <b style="color:var(--t-2)">2.0 mm</b> のブリッジが残ります。
+            キャンバス上の外径線をクリックすると、その位置に <b style="color:var(--t-2)">{{ bridgeWidth.toFixed(1) }} mm</b> のブリッジが残ります。
           </p>
-          <span class="meta">配置 0 / 推奨 4</span>
+          <span class="meta">配置 0 / 推奨 {{ bridgeRecommended }}</span>
+        </div>
+        <div v-else class="section-block">
+          <h6 class="lbl">配置済み <span class="right">クリック で 削除</span></h6>
+          <div class="edge-list">
+            <div
+              v-for="(b, i) in bridges"
+              :key="b.id"
+              class="edge-row"
+              style="cursor:default"
+            >
+              <span class="ix">B{{ i + 1 }}</span>
+              <div>
+                <div class="nm">{{ b.edge_id }}</div>
+                <div class="ns">
+                  幅 {{ b.width_mm.toFixed(1) }} mm · ratio {{ b.position_ratio.toFixed(2) }}
+                  <template v-if="b.position">· {{ fmtCoord(b.position) }}</template>
+                </div>
+              </div>
+              <button class="row-x" title="削除" @click="removeBridge(b.id)">×</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button
+            class="action-btn"
+            :disabled="bridges.length === 0"
+            @click="bridges.forEach((b) => removeBridge(b.id))"
+          >配置をクリア</button>
+          <button
+            class="action-btn cy"
+            :disabled="!currentFile"
+            @click="addBridgeAuto"
+          >
+            <svg><use href="#i-arrow-right" /></svg>自動配置
+          </button>
         </div>
       </template>
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* Phase 4 — Per-row delete affordance (× button on dim/hole/note/bridge
+   added-item rows). Sized to slot into the .edge-row's ``auto`` trailing
+   column without disturbing the v3 row height. */
+.row-x {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  color: var(--t-3);
+  font-family: var(--f-mono);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.row-x:hover {
+  color: var(--am);
+  border-color: rgba(245, 166, 35, 0.4);
+  background: var(--am-soft);
+}
+</style>

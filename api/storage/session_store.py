@@ -294,6 +294,66 @@ class SessionStore:
                 pass
             raise
 
+    # -- Phase 4 — drawing-tool state (dimensions / edits / holes / notes / bridges)
+
+    # Single helper bucket so we never duplicate the JSON I/O dance per file.
+    # All five tools share identical persistence semantics (read returns
+    # ``None`` if missing, write is atomic-replace, session validated).
+    _PHASE4_FILES = {
+        "dimensions": "dimensions.json",
+        "edits": "edits.json",
+        "added_holes": "added_holes.json",
+        "notes": "notes.json",
+        "bridges": "bridges.json",
+    }
+
+    def _phase4_path(self, sid: str, fid: str, key: str) -> Path:
+        return self._state_dir(sid, fid) / self._PHASE4_FILES[key]
+
+    def read_phase4(self, sid: str, fid: str, key: str) -> dict | None:
+        path = self._phase4_path(sid, fid, key)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("%s unreadable for %s/%s: %s", path.name, sid, fid, exc)
+            return None
+
+    def write_phase4(self, sid: str, fid: str, key: str, payload: dict) -> None:
+        self.get(sid)  # validate session
+        target = self._phase4_path(sid, fid, key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{key}.", suffix=".json", dir=str(target.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def delete_phase4_item(self, sid: str, fid: str, key: str, item_id: str) -> bool:
+        """Remove a single item by ``id`` from the persisted list.
+
+        Returns ``True`` if removed, ``False`` if id not found or file
+        missing. ``KeyError`` if ``key`` is not a Phase-4 bucket.
+        """
+
+        data = self.read_phase4(sid, fid, key) or {}
+        items = list(data.get(key) or [])
+        keep = [it for it in items if str(it.get("id")) != str(item_id)]
+        if len(keep) == len(items):
+            return False
+        data[key] = keep
+        self.write_phase4(sid, fid, key, data)
+        return True
+
     def invalidate_offset(self, sid: str, fid: str) -> bool:
         """Drop any cached offset result for ``fid`` (H11).
 

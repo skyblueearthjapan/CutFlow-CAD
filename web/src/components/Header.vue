@@ -33,13 +33,30 @@ const {
   registerFolderPicker,
   // Phase 3
   pdfExportOptions,
+  dxfExportOptions,
   pdfMaterial,
   isExportingPdf,
   setPdfFrameOption,
   setPdfWithOffset,
   setPdfWithChamfer,
+  setPdfWithDimensions,
+  setPdfWithAddedHoles,
+  setPdfWithNotes,
+  setPdfWithBridges,
+  setPdfWithEdits,
+  setDxfWithDimensions,
+  setDxfWithAddedHoles,
+  setDxfWithNotes,
+  setDxfWithBridges,
+  setDxfWithEdits,
   setPdfMaterial,
   exportPdf,
+  // Phase 4 lists drive the auto-disable for empty overlays.
+  dimensions,
+  addedHoles,
+  notes,
+  bridges,
+  vertexEdits,
 } = useSession();
 
 /** Format radio + checkbox state local to the dropdown UI. */
@@ -230,6 +247,55 @@ const titleParts = computed(() => {
               />
               <span>加工代を含める <small v-if="!offsetResult">(未計算)</small></span>
             </label>
+            <!-- C3: Phase 4 overlay toggles for DXF. Each box is disabled
+                 when the corresponding overlay list is empty so the user
+                 cannot ask the backend to include something that does
+                 not exist. -->
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="dxfExportOptions.with_dimensions"
+                @change="setDxfWithDimensions(($event.target as HTMLInputElement).checked)"
+                :disabled="dimensions.length === 0"
+              />
+              <span>寸法を含める <small v-if="dimensions.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="dxfExportOptions.with_added_holes"
+                @change="setDxfWithAddedHoles(($event.target as HTMLInputElement).checked)"
+                :disabled="addedHoles.length === 0"
+              />
+              <span>追加穴を含める <small v-if="addedHoles.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="dxfExportOptions.with_notes"
+                @change="setDxfWithNotes(($event.target as HTMLInputElement).checked)"
+                :disabled="notes.length === 0"
+              />
+              <span>注記を含める <small v-if="notes.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="dxfExportOptions.with_bridges"
+                @change="setDxfWithBridges(($event.target as HTMLInputElement).checked)"
+                :disabled="bridges.length === 0"
+              />
+              <span>ブリッジを含める <small v-if="bridges.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="dxfExportOptions.with_edits"
+                @change="setDxfWithEdits(($event.target as HTMLInputElement).checked)"
+                :disabled="vertexEdits.length === 0"
+              />
+              <span>線編集を反映 <small v-if="vertexEdits.length === 0">(なし)</small></span>
+            </label>
           </template>
 
           <!-- PDF options -->
@@ -291,6 +357,52 @@ const titleParts = computed(() => {
                 @change="setPdfWithChamfer(($event.target as HTMLInputElement).checked)"
               />
               <span>C面注記を含める</span>
+            </label>
+            <!-- C3: Phase 4 overlay toggles for PDF (auto-disabled empty). -->
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_dimensions"
+                @change="setPdfWithDimensions(($event.target as HTMLInputElement).checked)"
+                :disabled="dimensions.length === 0"
+              />
+              <span>寸法を含める <small v-if="dimensions.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_added_holes"
+                @change="setPdfWithAddedHoles(($event.target as HTMLInputElement).checked)"
+                :disabled="addedHoles.length === 0"
+              />
+              <span>追加穴を含める <small v-if="addedHoles.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_notes"
+                @change="setPdfWithNotes(($event.target as HTMLInputElement).checked)"
+                :disabled="notes.length === 0"
+              />
+              <span>注記を含める <small v-if="notes.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_bridges"
+                @change="setPdfWithBridges(($event.target as HTMLInputElement).checked)"
+                :disabled="bridges.length === 0"
+              />
+              <span>ブリッジを含める <small v-if="bridges.length === 0">(なし)</small></span>
+            </label>
+            <label class="ex-check">
+              <input
+                type="checkbox"
+                :checked="pdfExportOptions.with_edits"
+                @change="setPdfWithEdits(($event.target as HTMLInputElement).checked)"
+                :disabled="vertexEdits.length === 0"
+              />
+              <span>線編集を反映 <small v-if="vertexEdits.length === 0">(なし)</small></span>
             </label>
           </template>
 

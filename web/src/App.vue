@@ -9,25 +9,71 @@ import Inspector from './components/Inspector.vue';
 import TabBar from './components/TabBar.vue';
 import StatusBar from './components/StatusBar.vue';
 import { useActiveTool, keyToMode } from './stores/activeTool';
+import { useSession } from './stores/session';
 // raw 文字列として SVG スプライトを取り込む (xmlns 付きの完全な <svg>)
 import iconSprite from './assets/icons.svg?raw';
 
-const { setTool } = useActiveTool();
+const { activeTool, setTool } = useActiveTool();
+const {
+  setDimTwoPointMode,
+  dimTwoPointMode,
+  setHolePatternOpen,
+  holePatternOpen,
+  setNotePendingAnchor,
+  notePendingAnchor,
+  setEditOrtho,
+} = useSession();
 
 function onKey(e: KeyboardEvent) {
   // INPUT/TEXTAREA フォーカス中は無視 (数値入力を妨げない)
   const tag = (e.target as HTMLElement | null)?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   const mode = keyToMode[e.key];
-  if (mode) setTool(mode);
+  if (mode) {
+    setTool(mode);
+    return;
+  }
+  // Phase 4 — mode-specific letter shortcuts.
+  if (e.key === 'D' || e.key === 'd') {
+    if (activeTool.value === 'dim') setDimTwoPointMode(!dimTwoPointMode.value);
+    return;
+  }
+  if (e.key === 'A' || e.key === 'a') {
+    if (activeTool.value === 'hole') setHolePatternOpen(!holePatternOpen.value);
+    return;
+  }
+  if (e.key === 'T' || e.key === 't') {
+    if (activeTool.value === 'note' && !notePendingAnchor.value) {
+      // Open the modal anchored at the origin so the user can type immediately
+      // without having to click first. The canvas click handler still works
+      // for spatial placement.
+      setNotePendingAnchor([0, 0]);
+    }
+    return;
+  }
+  if (e.key === 'Shift') {
+    if (activeTool.value === 'edit') setEditOrtho(true);
+    return;
+  }
+  if (e.key === 'Escape') {
+    if (activeTool.value === 'dim' && dimTwoPointMode.value) setDimTwoPointMode(false);
+    if (activeTool.value === 'note' && notePendingAnchor.value) setNotePendingAnchor(null);
+    if (activeTool.value === 'hole' && holePatternOpen.value) setHolePatternOpen(false);
+  }
+}
+
+function onKeyUp(e: KeyboardEvent) {
+  if (e.key === 'Shift' && activeTool.value === 'edit') setEditOrtho(false);
 }
 
 onMounted(() => {
   document.addEventListener('keydown', onKey);
+  document.addEventListener('keyup', onKeyUp);
 });
 
 onUnmounted(() => {
   document.removeEventListener('keydown', onKey);
+  document.removeEventListener('keyup', onKeyUp);
 });
 </script>
 

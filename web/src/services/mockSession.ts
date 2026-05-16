@@ -8,10 +8,16 @@
  * end without the backend.
  *
  * Mock storage lives in module scope (cleared on page reload).
+ *
+ * Phase 4 contract (C1): mock honours the same field names as the real
+ * backend — ``id`` / ``position`` / ``position_ratio`` / ``width_mm`` etc.
+ * — so a switch between live and mock is transparent to the UI.
  */
 
 import type {
+  AddedHole,
   BoundingBox,
+  Bridge,
   ChamferAnnotation,
   ChamferGeometry,
   ChamferSpec,
@@ -19,15 +25,20 @@ import type {
   CornerInfo,
   DeleteCandidates,
   DeleteResult,
+  Dimension,
   EdgeInfo,
+  EditedVertex,
   Entity,
   FileData,
+  HolePatternRequest,
+  Note,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
   PdfExportOptions,
   Session,
   SessionFile,
+  SnapResult,
 } from '../types/dxf';
 
 interface MockBundle {
@@ -35,6 +46,12 @@ interface MockBundle {
   files: Map<string, FileData>;
   /** Per-file chamfer specs (Phase 3 mock). */
   chamfer: Map<string, ChamferSpec[]>;
+  /** Per-file Phase 4 annotation state. */
+  dimensions: Map<string, Dimension[]>;
+  vertexEdits: Map<string, EditedVertex[]>;
+  addedHoles: Map<string, AddedHole[]>;
+  notes: Map<string, Note[]>;
+  bridges: Map<string, Bridge[]>;
 }
 
 const _store = new Map<string, MockBundle>();
@@ -250,7 +267,16 @@ export async function mockUploadFiles(files: File[]): Promise<Session> {
     files: sessionFiles,
     expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
   };
-  _store.set(sid, { session, files: fileMap, chamfer: new Map() });
+  _store.set(sid, {
+    session,
+    files: fileMap,
+    chamfer: new Map(),
+    dimensions: new Map(),
+    vertexEdits: new Map(),
+    addedHoles: new Map(),
+    notes: new Map(),
+    bridges: new Map(),
+  });
   return session;
 }
 
@@ -521,22 +547,13 @@ function locateBundle(sid: string): MockBundle {
   return bundle;
 }
 
-/** Build the corner + edge records from the file's bounding box.
- *
- *  The sample geometry is a rounded rectangle, so we synthesize the four
- *  convex corners at the bbox extents (C1: top-right, C2: top-left,
- *  C3: bottom-left, C4: bottom-right) — matching the labels the v3 mockup
- *  uses on its corner-chip list. Edges (E1..E4) follow the same CCW order
- *  starting at the top side. (C1, H1) */
+/** Build the corner + edge records from the file's bounding box. */
 export async function mockGetCorners(
   sid: string,
   fid: string,
 ): Promise<{ corners: CornerInfo[]; edges: EdgeInfo[] }> {
   await new Promise((r) => setTimeout(r, 80));
   const file = locateFile(sid, fid);
-  // The sample DXF has a rounded rectangle outer (margin r=20). We pick the
-  // 4 visual corners just inside the rounding so the marker sits on the
-  // outer edge. The exact value is cosmetic — backend supplies real ones.
   const bb = file.bounding_box;
   const r = 20;
   const xR = bb.max_x - 90 - r;
@@ -544,24 +561,23 @@ export async function mockGetCorners(
   const yT = bb.max_y - 90 - r;
   const yB = bb.min_y + 90 + r;
   const corners: CornerInfo[] = [
-    { corner_id: 'C1', position: [xR, yT], angle_deg: 90, is_acute: false, is_convex: true },  // 右上
-    { corner_id: 'C2', position: [xL, yT], angle_deg: 90, is_acute: false, is_convex: true },  // 左上
-    { corner_id: 'C3', position: [xL, yB], angle_deg: 90, is_acute: false, is_convex: true },  // 左下
-    { corner_id: 'C4', position: [xR, yB], angle_deg: 90, is_acute: false, is_convex: true },  // 右下
+    { corner_id: 'C1', position: [xR, yT], angle_deg: 90, is_acute: false, is_convex: true },
+    { corner_id: 'C2', position: [xL, yT], angle_deg: 90, is_acute: false, is_convex: true },
+    { corner_id: 'C3', position: [xL, yB], angle_deg: 90, is_acute: false, is_convex: true },
+    { corner_id: 'C4', position: [xR, yB], angle_deg: 90, is_acute: false, is_convex: true },
   ];
   const w = xR - xL;
   const h = yT - yB;
   const edges: EdgeInfo[] = [
-    { edge_id: 'E1', midpoint: [(xR + xL) / 2, yT], length: w },  // top
-    { edge_id: 'E2', midpoint: [xL, (yT + yB) / 2], length: h },  // left
-    { edge_id: 'E3', midpoint: [(xR + xL) / 2, yB], length: w },  // bottom
-    { edge_id: 'E4', midpoint: [xR, (yT + yB) / 2], length: h },  // right
+    { edge_id: 'E1', midpoint: [(xR + xL) / 2, yT], length: w },
+    { edge_id: 'E2', midpoint: [xL, (yT + yB) / 2], length: h },
+    { edge_id: 'E3', midpoint: [(xR + xL) / 2, yB], length: w },
+    { edge_id: 'E4', midpoint: [xR, (yT + yB) / 2], length: h },
   ];
   return { corners, edges };
 }
 
-/** Build chamfer annotations from specs + corner / edge positions.
- *  Backend format: `{ corner_id, position, label, kind }` (H2). */
+/** Build chamfer annotations from specs + corner / edge positions. */
 function buildChamferGeometry(
   specs: ChamferSpec[],
   corners: CornerInfo[],
@@ -601,7 +617,6 @@ export async function mockSetChamfer(
 ): Promise<{ specs: ChamferSpec[]; geometry: ChamferGeometry }> {
   await new Promise((r) => setTimeout(r, 100));
   const bundle = locateBundle(sid);
-  // Mirror the backend: full replace.
   bundle.chamfer.set(fid, [...specs]);
   const { corners, edges } = await mockGetCorners(sid, fid);
   return { specs: [...specs], geometry: buildChamferGeometry(specs, corners, edges) };
@@ -624,16 +639,299 @@ export async function mockCleanupFrame(
 ): Promise<CleanupFrameResult> {
   await new Promise((r) => setTimeout(r, 120));
   const file = locateFile(sid, fid);
-  // The sample data tags one entity with category 'frame' — use those ids.
   const frameIds = file.entities
     .filter((e) => e.category === 'frame')
     .map((e) => e.id);
-  // Mirror live backend: stage for deletion via deleted_ids so the canvas
-  // hides them immediately on next file fetch.
   const next = new Set(file.deleted_ids ?? []);
   for (const id of frameIds) next.add(id);
   file.deleted_ids = [...next].sort();
   return { removed_count: frameIds.length, frame_entity_ids: frameIds };
+}
+
+/* -------------------- Phase 4: dim / edit / hole / note / bridge ---------- */
+
+/** GET /dimensions — list (defaults to empty when nothing added yet). */
+export async function mockListDimensions(sid: string, fid: string): Promise<Dimension[]> {
+  const bundle = locateBundle(sid);
+  return [...(bundle.dimensions.get(fid) ?? [])];
+}
+
+/** POST /dimensions — last-write-wins replace. */
+export async function mockSetDimensions(
+  sid: string,
+  fid: string,
+  dimensions: Dimension[],
+): Promise<Dimension[]> {
+  await new Promise((r) => setTimeout(r, 30));
+  const bundle = locateBundle(sid);
+  bundle.dimensions.set(fid, [...dimensions]);
+  return [...dimensions];
+}
+
+/** Convenience: append + persist a single dim (mirrors api.ts addDimension). */
+export async function mockAddDimension(
+  sid: string,
+  fid: string,
+  dim: Dimension,
+): Promise<Dimension[]> {
+  const bundle = locateBundle(sid);
+  const list = bundle.dimensions.get(fid) ?? [];
+  const next = [...list, dim];
+  bundle.dimensions.set(fid, next);
+  return next;
+}
+
+/** DELETE /dimensions/{id}. */
+export async function mockRemoveDimension(
+  sid: string,
+  fid: string,
+  id: string,
+): Promise<void> {
+  const bundle = locateBundle(sid);
+  const list = bundle.dimensions.get(fid) ?? [];
+  bundle.dimensions.set(fid, list.filter((d) => d.id !== id));
+}
+
+/** POST /edit-vertex — record a vertex translation. */
+export async function mockEditVertex(
+  sid: string,
+  fid: string,
+  edit: EditedVertex,
+): Promise<EditedVertex[]> {
+  await new Promise((r) => setTimeout(r, 40));
+  const bundle = locateBundle(sid);
+  const list = bundle.vertexEdits.get(fid) ?? [];
+  // Last-write-wins per (entity_id, vertex_index).
+  const next = list.filter(
+    (e) => !(e.entity_id === edit.entity_id && e.vertex_index === edit.vertex_index),
+  );
+  next.push(edit);
+  bundle.vertexEdits.set(fid, next);
+  return [...next];
+}
+
+/** POST /snap — return the snapped point (endpoint / midpoint / grid). */
+export async function mockSnap(
+  sid: string,
+  fid: string,
+  cursor: [number, number],
+  tolerance = 6,
+): Promise<SnapResult> {
+  const file = locateFile(sid, fid);
+  const cx = cursor[0];
+  const cy = cursor[1];
+
+  let best: { p: [number, number]; type: SnapResult['type']; d: number; eid: string | null } | null = null;
+  const consider = (
+    p: [number, number],
+    type: SnapResult['type'],
+    eid: string | null,
+  ) => {
+    const d = Math.hypot(p[0] - cx, p[1] - cy);
+    if (d > tolerance) return;
+    if (!best || d < best.d) best = { p, type, d, eid };
+  };
+  for (const e of file.entities) {
+    if (e.type === 'LINE') {
+      const x1 = +e.geom?.x1 || 0, y1 = +e.geom?.y1 || 0;
+      const x2 = +e.geom?.x2 || 0, y2 = +e.geom?.y2 || 0;
+      consider([x1, y1], 'endpoint', e.id);
+      consider([x2, y2], 'endpoint', e.id);
+      consider([(x1 + x2) / 2, (y1 + y2) / 2], 'midpoint', e.id);
+    } else if (e.type === 'CIRCLE') {
+      consider([+e.geom?.cx || 0, +e.geom?.cy || 0], 'center', e.id);
+    }
+  }
+  if (best !== null) {
+    const b = best as { p: [number, number]; type: SnapResult['type']; d: number; eid: string | null };
+    return { snapped: b.p, type: b.type, entity_id: b.eid, distance: b.d };
+  }
+  // Grid snap (1 mm).
+  const gx = Math.round(cx);
+  const gy = Math.round(cy);
+  if (Math.hypot(gx - cx, gy - cy) <= 0.5) {
+    return { snapped: [gx, gy], type: 'grid', entity_id: null, distance: Math.hypot(gx - cx, gy - cy) };
+  }
+  return { snapped: null, type: null };
+}
+
+/** GET /holes (added) — list. */
+export async function mockListHoles(sid: string, fid: string): Promise<AddedHole[]> {
+  const bundle = locateBundle(sid);
+  return [...(bundle.addedHoles.get(fid) ?? [])];
+}
+
+/** POST /holes — append a hole (dedup by id). */
+export async function mockAddHole(
+  sid: string,
+  fid: string,
+  hole: AddedHole,
+): Promise<AddedHole[]> {
+  await new Promise((r) => setTimeout(r, 50));
+  const bundle = locateBundle(sid);
+  const list = bundle.addedHoles.get(fid) ?? [];
+  const next = [...list.filter((h) => h.id !== hole.id), hole];
+  bundle.addedHoles.set(fid, next);
+  return next;
+}
+
+/** POST /holes/pattern — expand a rows×cols grid into individual holes. */
+export async function mockAddHolePattern(
+  sid: string,
+  fid: string,
+  req: HolePatternRequest,
+): Promise<AddedHole[]> {
+  await new Promise((r) => setTimeout(r, 80));
+  const bundle = locateBundle(sid);
+  const list = bundle.addedHoles.get(fid) ?? [];
+  const added: AddedHole[] = [];
+  for (let r = 0; r < req.rows; r++) {
+    for (let c = 0; c < req.cols; c++) {
+      added.push({
+        id: uid('h'),
+        position: [
+          req.anchor[0] + c * req.spacing[0],
+          req.anchor[1] + r * req.spacing[1],
+        ],
+        diameter: req.diameter,
+        tap_note: req.tap_note ?? null,
+      });
+    }
+  }
+  bundle.addedHoles.set(fid, [...list, ...added]);
+  return [...bundle.addedHoles.get(fid)!];
+}
+
+/** DELETE /holes/{id}. */
+export async function mockRemoveHole(
+  sid: string,
+  fid: string,
+  id: string,
+): Promise<void> {
+  const bundle = locateBundle(sid);
+  const list = bundle.addedHoles.get(fid) ?? [];
+  bundle.addedHoles.set(fid, list.filter((h) => h.id !== id));
+}
+
+/** GET /notes — list. */
+export async function mockListNotes(sid: string, fid: string): Promise<Note[]> {
+  const bundle = locateBundle(sid);
+  return [...(bundle.notes.get(fid) ?? [])];
+}
+
+/** POST /notes — last-write-wins replace. */
+export async function mockSetNotes(
+  sid: string,
+  fid: string,
+  notes: Note[],
+): Promise<Note[]> {
+  await new Promise((r) => setTimeout(r, 30));
+  const bundle = locateBundle(sid);
+  bundle.notes.set(fid, [...notes]);
+  return [...notes];
+}
+
+/** Append a single note (mirrors api.ts addNote). */
+export async function mockAddNote(
+  sid: string,
+  fid: string,
+  note: Note,
+): Promise<Note[]> {
+  const bundle = locateBundle(sid);
+  const list = bundle.notes.get(fid) ?? [];
+  const next = [...list, note];
+  bundle.notes.set(fid, next);
+  return next;
+}
+
+/** DELETE /notes/{id}. */
+export async function mockRemoveNote(
+  sid: string,
+  fid: string,
+  id: string,
+): Promise<void> {
+  const bundle = locateBundle(sid);
+  const list = bundle.notes.get(fid) ?? [];
+  bundle.notes.set(fid, list.filter((n) => n.id !== id));
+}
+
+/** GET /bridges — list. */
+export async function mockListBridges(sid: string, fid: string): Promise<Bridge[]> {
+  const bundle = locateBundle(sid);
+  return [...(bundle.bridges.get(fid) ?? [])];
+}
+
+/** POST /bridges — last-write-wins replace. */
+export async function mockSetBridges(
+  sid: string,
+  fid: string,
+  bridges: Bridge[],
+): Promise<Bridge[]> {
+  await new Promise((r) => setTimeout(r, 30));
+  const bundle = locateBundle(sid);
+  bundle.bridges.set(fid, [...bridges]);
+  return [...bridges];
+}
+
+/** Append a single bridge (mirrors api.ts addBridge). */
+export async function mockAddBridge(
+  sid: string,
+  fid: string,
+  bridge: Bridge,
+): Promise<Bridge[]> {
+  await new Promise((r) => setTimeout(r, 50));
+  const bundle = locateBundle(sid);
+  const list = bundle.bridges.get(fid) ?? [];
+  const next = [...list, bridge];
+  bundle.bridges.set(fid, next);
+  return next;
+}
+
+/** POST /bridges/auto — auto-distribute N bridges evenly around the outer.
+ *  H7: matches the backend exactly — auto replaces the ENTIRE bridge list
+ *  (no "manual + auto" mix) so the UI sees identical behaviour either way. */
+export async function mockAddBridgeAuto(
+  sid: string,
+  fid: string,
+  count: number,
+  width_mm: number,
+): Promise<Bridge[]> {
+  await new Promise((r) => setTimeout(r, 100));
+  const bundle = locateBundle(sid);
+  const file = locateFile(sid, fid);
+  const bb = file.bounding_box;
+  const w = bb.max_x - bb.min_x;
+  const h = bb.max_y - bb.min_y;
+  const midX = (bb.min_x + bb.max_x) / 2;
+  const midY = (bb.min_y + bb.max_y) / 2;
+  // Fixed 4 edges; clamp N to that for the mock.
+  const all: Array<{ edge_id: string; pos: [number, number] }> = [
+    { edge_id: 'E1', pos: [midX, bb.max_y - h * 0.08] }, // top
+    { edge_id: 'E4', pos: [bb.max_x - w * 0.08, midY] }, // right
+    { edge_id: 'E3', pos: [midX, bb.min_y + h * 0.08] }, // bottom
+    { edge_id: 'E2', pos: [bb.min_x + w * 0.08, midY] }, // left
+  ];
+  const positions = all.slice(0, Math.max(0, Math.min(4, count)));
+  const next: Bridge[] = positions.map((p) => ({
+    id: uid('b'),
+    edge_id: p.edge_id,
+    position_ratio: 0.5,
+    width_mm,
+    position: p.pos,
+  }));
+  bundle.bridges.set(fid, next);
+  return [...next];
+}
+
+/** DELETE /bridges/{id}. */
+export async function mockRemoveBridge(
+  sid: string,
+  fid: string,
+  id: string,
+): Promise<void> {
+  const bundle = locateBundle(sid);
+  const list = bundle.bridges.get(fid) ?? [];
+  bundle.bridges.set(fid, list.filter((b) => b.id !== id));
 }
 
 export async function mockExportPdf(
@@ -643,9 +941,6 @@ export async function mockExportPdf(
 ): Promise<Blob> {
   await new Promise((r) => setTimeout(r, 150));
   const file = locateFile(sid, fid);
-  // Synthesise a minimal-but-valid PDF so the download flow can be tested
-  // without ReportLab in the loop. The contents only need to identify
-  // themselves as PDF (header) and end (EOF); browsers will open / save it.
   const note =
     `% mock pdf for ${file.name}\n` +
     `% frame=${opts.frame} with_offset=${opts.with_offset} with_chamfer=${opts.with_chamfer}\n`;

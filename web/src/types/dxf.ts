@@ -231,8 +231,27 @@ export interface PdfExportOptions {
   frame: PdfFrameOption;
   with_offset: boolean;
   with_chamfer: boolean;
+  /** Phase 4 overlay flags (C3) — when true the backend bakes the
+   *  corresponding ``CUTFLOW_*`` layer into the export. */
+  with_dimensions?: boolean;
+  with_added_holes?: boolean;
+  with_notes?: boolean;
+  with_bridges?: boolean;
+  with_edits?: boolean;
   /** Optional material text rendered on the PDF header band (H4). */
   material?: string;
+}
+
+/** Mirror of PdfExportOptions but for the DXF export — only the with_*
+ *  flags matter on the wire (DXF ignores ``frame`` / ``material``). */
+export interface DxfExportOptions {
+  with_offset?: boolean;
+  with_chamfer?: boolean;
+  with_dimensions?: boolean;
+  with_added_holes?: boolean;
+  with_notes?: boolean;
+  with_bridges?: boolean;
+  with_edits?: boolean;
 }
 
 /** Result of POST /cleanup-frame. */
@@ -255,4 +274,122 @@ export interface DeleteCategoryRow {
   sub: string;
   /** Entity ids belonging to this category in the current file. */
   ids: string[];
+}
+
+/* -------------------- Phase 4: dim / edit / hole / note / bridge ---------- */
+
+/** ISO 寸法 種別 — mirrors backend ``models.DimensionType``. */
+export type DimensionType = 'linear' | 'aligned' | 'diameter' | 'radius';
+
+/** A dimension annotation added by the user via 2-click placement (tool 5).
+ *  Persisted server-side and re-emitted into the exported DXF when the
+ *  ``with_dimensions`` query flag is set.
+ *
+ *  Backend contract (C1): ``id`` (not ``dim_id``); ``text_override`` (not
+ *  ``text``); ``style`` is a free-form string identifier (defaults to ``iso``).
+ *  Precision / arrow_size are UI-only and stay client-side. */
+export interface Dimension {
+  id: string;
+  type: DimensionType;
+  /** Two anchor points in DXF coordinates (Y-up). */
+  p1: [number, number];
+  p2: [number, number];
+  /** Optional override text; when absent the backend formats the length. */
+  text_override?: string | null;
+  /** Style configuration (defaults to ``iso``). */
+  style?: string;
+}
+
+/** Edit applied to an existing entity vertex (tool 6 — line edit mode).
+ *  Backend identity is the (entity_id, vertex_index) pair — no separate
+ *  ``edit_id`` is allocated (C1). The frontend tracks the prior position
+ *  client-side via the ``original`` cache used only for drag previews. */
+export interface EditedVertex {
+  /** Target entity (LINE / LWPOLYLINE etc). */
+  entity_id: string;
+  /** Vertex index within the entity (0/1 for LINE start/end, 0..n for polylines). */
+  vertex_index: number;
+  /** New DXF position after snapping (server stores this as ``new_position``). */
+  new_position: [number, number];
+}
+
+/** Snap-point query result. Backend shape:
+ *  ``{snapped, type, entity_id, distance}`` (C1). */
+export type SnapKind =
+  | 'endpoint'
+  | 'midpoint'
+  | 'intersection'
+  | 'center'
+  | 'quadrant'
+  | 'grid';
+export interface SnapResult {
+  /** Snapped position; ``null`` when nothing matched within the tolerance. */
+  snapped: [number, number] | null;
+  /** Which snap rule fired (``null`` when no match). */
+  type: SnapKind | null;
+  /** Originating entity id, when the snap point came from a single entity. */
+  entity_id?: string | null;
+  /** Distance from the query cursor to the matched snap point (mm). */
+  distance?: number | null;
+}
+
+/** Hole added on top of the parsed geometry (tool 7).
+ *  Emitted into the exported DXF as ``CIRCLE`` entities when
+ *  ``with_added_holes`` is true. Backend contract: ``id`` + ``position``
+ *  (was ``hole_id`` + ``center`` in the legacy client). */
+export interface AddedHole {
+  id: string;
+  /** Centre in DXF coordinates. */
+  position: [number, number];
+  /** Diameter in mm — UI display uses ``φ{diameter}``. */
+  diameter: number;
+  /** Optional tap-thread note (e.g. ``"M8"``) rendered next to the hole. */
+  tap_note?: string | null;
+}
+
+/** Aligned-pattern request used by the H pattern modal. */
+export interface HolePatternRequest {
+  /** Bottom-left hole position (was ``origin`` in the legacy client). */
+  anchor: [number, number];
+  rows: number;
+  cols: number;
+  /** [dx, dy] pitch in mm (replaces separate ``pitch_x`` / ``pitch_y``). */
+  spacing: [number, number];
+  diameter: number;
+  tap_note?: string | null;
+}
+
+/** Note (annotation text) added by the operator (tool 8). */
+export type NotePreset = 'roughness' | 'welding' | 'general';
+export interface Note {
+  id: string;
+  /** Anchor in DXF coordinates. */
+  position: [number, number];
+  /** Free-form text. */
+  text: string;
+  /** Preset bucket (drives the v3 colour token). */
+  preset: NotePreset;
+  /** Font size in mm (backend field name). */
+  font_size_mm: number;
+  /** Rotation in degrees (defaults to 0). */
+  rotation_deg?: number;
+}
+
+/** A bridge (holding tab) left on an outer-loop edge (tool 9).
+ *  Backend contract (C1): identified by ``id``; the bridge lives on
+ *  ``edge_id`` (``E1..En``) at fractional ``position_ratio`` ∈ [0, 1]
+ *  along the edge. ``position`` is a backend-computed convenience that
+ *  the frontend uses for canvas placement. */
+export interface Bridge {
+  id: string;
+  /** Outer edge id this bridge sits on (``E1``..``En`` from /corners). */
+  edge_id: string;
+  /** Fractional position along the edge (0 = start, 1 = end). */
+  position_ratio: number;
+  /** Bridge width in mm (backend field name; renamed from ``width``). */
+  width_mm: number;
+  /** Backend-computed midpoint of the bridge along the edge (DXF coords).
+   *  Optional because the bare POST/PUT shape doesn't include it; the
+   *  serializer attaches it before the response leaves the wire. */
+  position?: [number, number];
 }

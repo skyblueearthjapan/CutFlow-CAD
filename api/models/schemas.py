@@ -302,3 +302,213 @@ class CornersResponse(BaseModel):
 class FrameCleanupResponse(BaseModel):
     removed_count: int = 0
     frame_entity_ids: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — dimension / edit / hole / note / bridge payloads
+# ---------------------------------------------------------------------------
+
+
+DimensionType = Literal["linear", "aligned", "diameter", "radius"]
+"""ISO 寸法 種別 — DESIGN.md §2 ツール一覧 5 (寸法)."""
+
+NotePreset = Literal["roughness", "welding", "general"]
+"""注記プリセット — frontend が選択する3カテゴリ (面粗さ / 溶接 / 自由文)."""
+
+SnapType = Literal["endpoint", "midpoint", "intersection", "center", "quadrant", "grid"]
+"""線編集モードで利用可能な snap 種別."""
+
+
+class Dimension(BaseModel):
+    """寸法 1 件 (linear / aligned / diameter / radius)。
+
+    Validation
+    ----------
+    * ``p1 == p2`` は拒否 (degenerate)。
+    * diameter / radius は ``p1``=中心, ``p2``=円周上点を慣例とする。
+    * ``text_override`` が指定された場合のみ実測値ではなくその文字列を使う。
+    """
+
+    id: str
+    type: DimensionType = "linear"
+    p1: list[float] = Field(default_factory=list)
+    p2: list[float] = Field(default_factory=list)
+    text_override: str | None = None
+    style: str = "iso"
+
+    @model_validator(mode="after")
+    def _validate_points(self) -> "Dimension":
+        if len(self.p1) < 2 or len(self.p2) < 2:
+            raise ValueError("p1, p2 はそれぞれ [x, y] が必要です")
+        if (
+            abs(float(self.p1[0]) - float(self.p2[0])) < 1e-9
+            and abs(float(self.p1[1]) - float(self.p2[1])) < 1e-9
+        ):
+            raise ValueError("p1 と p2 が一致しています (degenerate dimension)")
+        return self
+
+
+class DimensionRequest(BaseModel):
+    dimensions: list[Dimension] = Field(default_factory=list)
+
+
+class DimensionListResponse(BaseModel):
+    dimensions: list[Dimension] = Field(default_factory=list)
+
+
+class EditedVertex(BaseModel):
+    """線編集 — 既存エンティティ頂点の移動予約 (export 時に反映)."""
+
+    entity_id: str
+    vertex_index: int = Field(0, ge=0, le=100000)
+    new_position: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_pos(self) -> "EditedVertex":
+        if len(self.new_position) < 2:
+            raise ValueError("new_position は [x, y] が必要です")
+        return self
+
+
+class EditVertexRequest(BaseModel):
+    edits: list[EditedVertex] = Field(default_factory=list)
+
+
+class EditedVertexListResponse(BaseModel):
+    edits: list[EditedVertex] = Field(default_factory=list)
+
+
+class SnapRequest(BaseModel):
+    position: list[float] = Field(default_factory=list)
+    snap_types: list[SnapType] = Field(
+        default_factory=lambda: ["endpoint", "midpoint", "intersection"]
+    )
+    tolerance: float = Field(1.0, gt=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def _validate_pos(self) -> "SnapRequest":
+        if len(self.position) < 2:
+            raise ValueError("position は [x, y] が必要です")
+        return self
+
+
+class SnapResponse(BaseModel):
+    snapped: list[float] | None = None
+    type: SnapType | None = None
+    entity_id: str | None = None
+    distance: float | None = None
+
+
+class AddedHole(BaseModel):
+    """穴追加 — CIRCLE エンティティとして export 時に実体化."""
+
+    id: str
+    position: list[float] = Field(default_factory=list)
+    diameter: float = Field(..., gt=0.0, le=1000.0)
+    tap_note: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_position(self) -> "AddedHole":
+        if len(self.position) < 2:
+            raise ValueError("position は [x, y] が必要です")
+        return self
+
+
+class HoleAddRequest(BaseModel):
+    holes: list[AddedHole] = Field(default_factory=list)
+
+
+class HolePatternRequest(BaseModel):
+    """整列パターンで一括追加."""
+
+    anchor: list[float] = Field(default_factory=list)
+    rows: int = Field(..., ge=1, le=200)
+    cols: int = Field(..., ge=1, le=200)
+    spacing: list[float] = Field(default_factory=list)
+    diameter: float = Field(..., gt=0.0, le=1000.0)
+    tap_note: str | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "HolePatternRequest":
+        if len(self.anchor) < 2:
+            raise ValueError("anchor は [x, y] が必要です")
+        if len(self.spacing) < 2:
+            raise ValueError("spacing は [dx, dy] が必要です")
+        return self
+
+
+class HoleListResponse(BaseModel):
+    holes: list[AddedHole] = Field(default_factory=list)
+
+
+class Note(BaseModel):
+    """注記 (面粗さ / 溶接 / 自由文)。 ``preset`` は UI のテンプレ識別子。"""
+
+    id: str
+    position: list[float] = Field(default_factory=list)
+    text: str = Field(..., min_length=1, max_length=500)
+    preset: NotePreset = "general"
+    font_size_mm: float = Field(2.5, gt=0.0, le=50.0)
+    rotation_deg: float = 0.0
+
+    @model_validator(mode="after")
+    def _validate_position(self) -> "Note":
+        if len(self.position) < 2:
+            raise ValueError("position は [x, y] が必要です")
+        return self
+
+
+class NoteRequest(BaseModel):
+    notes: list[Note] = Field(default_factory=list)
+
+
+class NoteListResponse(BaseModel):
+    notes: list[Note] = Field(default_factory=list)
+
+
+class Bridge(BaseModel):
+    """外径エッジ上のブリッジ (保持タブ) 1 件。
+
+    ``edge_id`` は ``GET /corners`` が返す ``E1..En`` (LWPOLYLINE 外径の
+    場合は合成 ``En#k`` 形式も許容)。``position_ratio`` ∈ [0, 1] はエッジ長
+    に対する中央位置。
+
+    ``position`` (optional) — list endpoint serialiser が外径ジオメトリから
+    計算した DXF 座標 (``[x, y]``) を埋めて返す。POST body では送らないこと
+    が前提 (送られても無視)。"""
+
+    id: str
+    edge_id: str
+    position_ratio: float = Field(0.5, ge=0.0, le=1.0)
+    width_mm: float = Field(2.0, ge=0.5, le=10.0)
+    position: list[float] | None = None
+
+
+class BridgeRequest(BaseModel):
+    bridges: list[Bridge] = Field(default_factory=list)
+
+
+class BridgeAutoRequest(BaseModel):
+    """自動配置: ``count`` 個を外周等間隔で配置."""
+
+    count: int = Field(4, ge=1, le=32)
+    width_mm: float = Field(2.0, ge=0.5, le=10.0)
+
+
+class BridgeListResponse(BaseModel):
+    bridges: list[Bridge] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Unified annotations payload (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+class AnnotationsResponse(BaseModel):
+    """5 種類のオーバーレイを 1 endpoint で返却 (フロントは差分描画)."""
+
+    dimensions: list[Dimension] = Field(default_factory=list)
+    notes: list[Note] = Field(default_factory=list)
+    bridges: list[Bridge] = Field(default_factory=list)
+    added_holes: list[AddedHole] = Field(default_factory=list)
+    edits: list[EditedVertex] = Field(default_factory=list)
