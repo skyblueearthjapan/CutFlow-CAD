@@ -21,6 +21,7 @@ import { computed, ref, shallowRef } from 'vue';
 import * as api from '../services/api';
 import type {
   AddedHole,
+  BoundingBox,
   Bridge,
   ChamferGeometry,
   ChamferSpec,
@@ -53,6 +54,7 @@ import type {
   SnapResult,
   Template,
 } from '../types/dxf';
+import { bboxIntersects, entityBbox } from '../utils/entityBbox';
 import { useActiveTool } from './activeTool';
 
 /** Tiny id helper — keeps the client-generated UUID-ish strings consistent
@@ -66,6 +68,18 @@ const _currentFileId = ref<string | null>(null);
 /** Use shallowRef so swapping a whole Map doesn't deep-track every entity. */
 const _files = shallowRef<Map<string, FileData>>(new Map());
 const _selectedForDelete = ref<Set<string>>(new Set());
+/** Rectangle-select sub-mode for the delete tool. When ``true``, mouse drags
+ *  on the canvas draw a selection rectangle and add the enclosed entities to
+ *  ``selectedForDelete`` (instead of treating the drag as a click). */
+const _rectSelectMode = ref<boolean>(false);
+/** Invert flag for rect-select: ``false`` selects entities inside the rect;
+ *  ``true`` selects everything OUTSIDE (part-stays, annotation-purges). */
+const _rectSelectInvert = ref<boolean>(false);
+/** Safety net for invert-mode: when ``true`` (default), entities classified
+ *  as ``outer`` AND the operator's confirmed manual chain are preserved even
+ *  if they lie outside the rect — so a "select everything outside" sweep
+ *  cannot accidentally nuke the part's outline. */
+const _protectOuterFromRect = ref<boolean>(true);
 const _isUploading = ref(false);
 const _isLoadingFile = ref(false);
 const _isDeleting = ref(false);
@@ -523,6 +537,8 @@ export function useSession() {
   async function selectFile(fid: string): Promise<void> {
     _currentFileId.value = fid;
     _selectedForDelete.value = new Set();
+    _rectSelectMode.value = false;
+    _rectSelectInvert.value = false;
     _manualMode.value = false;
     // Phase 3: the cleanup-frame banner is per-action, not per-file —
     // clear it so the green strip from file A doesn't leak into file B.
@@ -614,6 +630,89 @@ export function useSession() {
   function clearSelection(): void {
     if (_selectedForDelete.value.size === 0) return;
     _selectedForDelete.value = new Set();
+  }
+
+  /** Toggle the rectangle-select sub-mode (delete tool only). Turning it off
+   *  also clears the invert flag — operator expectation is "off = fresh
+   *  default" so the next time they flip it on they always start in the
+   *  safer inside-mode. */
+  function setRectSelectMode(on: boolean): void {
+    _rectSelectMode.value = on;
+    if (!on) _rectSelectInvert.value = false;
+  }
+  function setRectInvert(on: boolean): void {
+    _rectSelectInvert.value = on;
+  }
+  function setProtectOuterFromRect(on: boolean): void {
+    _protectOuterFromRect.value = on;
+  }
+
+  /** Add every entity whose bbox satisfies the rect predicate to
+   *  ``selectedForDelete``. Inside-mode requires the bbox to intersect (a
+   *  generous rule so brushing the rect over a TEXT anchor at the title block
+   *  catches it); outside-mode requires the bbox to be fully outside the rect
+   *  (a stricter rule so an entity straddling the boundary is preserved by
+   *  default — the operator can always extend the rect).
+   *
+   *  The outer-protection guard (default ON) keeps the confirmed outer loop
+   *  AND any manual chain alive in invert-mode so a "select everything
+   *  outside the part" sweep cannot wipe the outline. */
+  function selectByRect(
+    fid: string,
+    rect: BoundingBox,
+    invert: boolean,
+  ): void {
+    const file = _files.value.get(fid);
+    if (!file) return;
+    // Normalize the rect — operators drag in either direction.
+    const r: BoundingBox = {
+      min_x: Math.min(rect.min_x, rect.max_x),
+      max_x: Math.max(rect.min_x, rect.max_x),
+      min_y: Math.min(rect.min_y, rect.max_y),
+      max_y: Math.max(rect.min_y, rect.max_y),
+    };
+    // Skip degenerate rects (single-pixel drag = click) so an inside-sweep
+    // with zero area can't accidentally select a stack of overlapping
+    // entities that all happen to touch the same point.
+    if (r.max_x - r.min_x <= 0 || r.max_y - r.min_y <= 0) return;
+
+    // Outer-protection set: confirmed outer loop ids + any manual chain.
+    const protectedIds = new Set<string>();
+    if (invert && _protectOuterFromRect.value) {
+      const outer = _outerByFile.value.get(fid)?.outer_loop ?? [];
+      outer.forEach((id) => protectedIds.add(id));
+      const manual = _manualByFile.value.get(fid) ?? [];
+      manual.forEach((id) => protectedIds.add(id));
+      // Also keep entities the backend classifies as ``outer`` (covers the
+      // case where /detect-outer hasn't been run yet).
+      for (const e of file.entities) {
+        if (e.category === 'outer') protectedIds.add(e.id);
+      }
+    }
+
+    const deleted = new Set(file.deleted_ids ?? []);
+    const next = new Set(_selectedForDelete.value);
+    for (const e of file.entities) {
+      if (deleted.has(e.id)) continue;            // already server-deleted
+      if (protectedIds.has(e.id)) continue;       // outer guard (invert only)
+      const bb = entityBbox(e);
+      if (!bb) {
+        // Unknown geometry: in invert-mode we conservatively skip (we can't
+        // prove the entity is outside); in inside-mode we also skip (can't
+        // prove it's inside either).
+        continue;
+      }
+      if (invert) {
+        // Select when the bbox does NOT touch the rect at all — fully outside.
+        if (!bboxIntersects(bb, r)) next.add(e.id);
+      } else {
+        // Select when the bbox intersects the rect (touching = inside).
+        // bboxInside is the strict alternative; intersects keeps the brush
+        // forgiving for tiny TEXT anchors hugging the rect edge.
+        if (bboxIntersects(bb, r)) next.add(e.id);
+      }
+    }
+    _selectedForDelete.value = next;
   }
 
   /** POST the current selection, refresh the file cache, drop the selection. */
@@ -1678,6 +1777,9 @@ export function useSession() {
     visibleEntities,
     files: _files,
     selectedForDelete: _selectedForDelete,
+    rectSelectMode: _rectSelectMode,
+    rectSelectInvert: _rectSelectInvert,
+    protectOuterFromRect: _protectOuterFromRect,
     isUploading: _isUploading,
     isLoadingFile: _isLoadingFile,
     isDeleting: _isDeleting,
@@ -1723,6 +1825,10 @@ export function useSession() {
     toggleCategory,
     isCategoryOn,
     clearSelection,
+    setRectSelectMode,
+    setRectInvert,
+    setProtectOuterFromRect,
+    selectByRect,
     executeDelete,
     exportDxf,
     exportDxfWithOffset,

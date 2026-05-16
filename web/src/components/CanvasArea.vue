@@ -17,14 +17,19 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useActiveTool } from '../stores/activeTool';
 import { useSession } from '../stores/session';
+import { entityBbox } from '../utils/entityBbox';
 import EntityRenderer from './EntityRenderer.vue';
 
 const { showBanner, activeTool } = useActiveTool();
 const {
   currentFile,
+  currentFileId,
   visibleEntities,
   selectedForDelete,
   selectEntity,
+  rectSelectMode,
+  rectSelectInvert,
+  selectByRect,
   lastError,
   remainingAfterDelete,
   isLoadingFile,
@@ -91,67 +96,6 @@ onMounted(() => {
 onUnmounted(() => {
   if (timer !== undefined) window.clearInterval(timer);
 });
-
-/** Compute axis-aligned bbox for a single entity. Returns null if unknown. */
-function entityBbox(
-  e: { type: string; geom: any },
-): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
-  const g = e.geom;
-  if (!g) return null;
-  const num = (v: any): number =>
-    typeof v === 'number' && Number.isFinite(v) ? v : Number.NaN;
-  switch (e.type) {
-    case 'LINE': {
-      const x1 = num(g.x1), x2 = num(g.x2), y1 = num(g.y1), y2 = num(g.y2);
-      if ([x1, x2, y1, y2].some(Number.isNaN)) return null;
-      return {
-        min_x: Math.min(x1, x2), max_x: Math.max(x1, x2),
-        min_y: Math.min(y1, y2), max_y: Math.max(y1, y2),
-      };
-    }
-    case 'CIRCLE':
-    case 'ARC': {
-      const cx = num(g.cx), cy = num(g.cy), r = num(g.r);
-      if ([cx, cy, r].some(Number.isNaN)) return null;
-      return { min_x: cx - r, max_x: cx + r, min_y: cy - r, max_y: cy + r };
-    }
-    case 'LWPOLYLINE':
-    case 'POLYLINE': {
-      const vs = g.vertices;
-      if (!Array.isArray(vs) || vs.length === 0) return null;
-      let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
-      for (const v of vs) {
-        if (!Array.isArray(v) || v.length < 2) continue;
-        const x = num(v[0]), y = num(v[1]);
-        if (Number.isNaN(x) || Number.isNaN(y)) continue;
-        if (x < mnx) mnx = x; if (x > mxx) mxx = x;
-        if (y < mny) mny = y; if (y > mxy) mxy = y;
-      }
-      if (!Number.isFinite(mnx)) return null;
-      return { min_x: mnx, min_y: mny, max_x: mxx, max_y: mxy };
-    }
-    case 'POINT':
-    case 'INSERT':
-    case 'TEXT':
-    case 'MTEXT': {
-      const x = num(g.x), y = num(g.y);
-      if (Number.isNaN(x) || Number.isNaN(y)) return null;
-      return { min_x: x, min_y: y, max_x: x, max_y: y };
-    }
-    case 'ELLIPSE': {
-      const cx = num(g.cx), cy = num(g.cy);
-      const mx = num(g.major_x ?? 0), my = num(g.major_y ?? 0);
-      const ratio = num(g.ratio ?? 1);
-      if ([cx, cy].some(Number.isNaN)) return null;
-      const a = Math.hypot(mx, my);
-      const b = a * (Number.isFinite(ratio) ? ratio : 1);
-      const r = Math.max(a, b);
-      return { min_x: cx - r, max_x: cx + r, min_y: cy - r, max_y: cy + r };
-    }
-    default:
-      return null;
-  }
-}
 
 /** Bounding box that *ignores* annotation/frame entities so the viewBox
  *  zooms to the actual part rather than the surrounding production frame.
@@ -295,6 +239,26 @@ const svgRef = ref<SVGSVGElement | null>(null);
  *  the dim 1-point preview and snap indicator render in real time. */
 const liveCursor = ref<[number, number] | null>(null);
 const editDragOrigin = ref<[number, number] | null>(null);
+
+/* -------------------- Rect-select (delete mode) ------------------------- */
+/** Drag origin (DXF coords) for the delete rect-select tool. When set, the
+ *  next mousemove updates ``dragRect`` and mouseup commits the rect to the
+ *  store via ``selectByRect``. The 4-px click-vs-drag threshold lives in
+ *  ``RECT_DRAG_THRESHOLD_PX``: anything below it is treated as a normal
+ *  click so the existing per-entity toggle behaviour keeps working. */
+const rectDragOrigin = ref<[number, number] | null>(null);
+const rectDragOriginScreen = ref<[number, number] | null>(null);
+const dragRect = ref<{
+  min_x: number;
+  min_y: number;
+  max_x: number;
+  max_y: number;
+} | null>(null);
+const RECT_DRAG_THRESHOLD_PX = 4;
+/** True once the cursor has moved beyond the click threshold during a
+ *  rect-select drag — used in mouseup to decide whether to commit the rect
+ *  or fall through to the normal click handler. */
+const rectDragActive = ref<boolean>(false);
 
 /** Convert a DOM click/mouse event to DXF (Y-up) coordinates by walking the
  *  inverse of the SVG CTM and undoing the parent ``scale(1,-1)`` flip. */
@@ -452,6 +416,18 @@ function onCanvasClick(e: MouseEvent) {
   if (activeTool.value !== 'delete' && !(activeTool.value === 'outer' && manualMode.value)) {
     return;
   }
+  // If the user just finished a rect-select drag, swallow the click so the
+  // entity under the cursor isn't also toggled. ``rectDragActive`` is reset
+  // in mouseup but the click event fires immediately after, so we read the
+  // most recently committed rect to detect this case.
+  if (
+    activeTool.value === 'delete' &&
+    rectSelectMode.value &&
+    _rectJustCommitted
+  ) {
+    _rectJustCommitted = false;
+    return;
+  }
   const id = findAttr(e.target, 'data-entity-id');
   if (id) {
     if (activeTool.value === 'delete') {
@@ -461,6 +437,12 @@ function onCanvasClick(e: MouseEvent) {
     }
   }
 }
+
+/** Set by ``onCanvasMouseUp`` when a rect was committed; consumed by the
+ *  next ``onCanvasClick`` so the trailing click event doesn't also toggle
+ *  the entity under the cursor. Plain module-local mutable to avoid an
+ *  extra reactive ref — the value lives for ≤1 event loop tick. */
+let _rectJustCommitted = false;
 
 /** Mouse move — drives the live cursor + dim preview + snap indicator.
  *  M5: snap requests are throttled to ~5 Hz during drags so a fast
@@ -474,6 +456,34 @@ function onCanvasMouseMove(e: MouseEvent) {
   liveCursor.value = p;
   cursorX.value = p[0].toFixed(1);
   cursorY.value = p[1].toFixed(1);
+  // Delete-mode rect-select: extend the rubber-band rect while dragging.
+  // We only flip ``rectDragActive`` once the cursor crosses the click
+  // threshold so a quick mousedown→mouseup at the same spot still falls
+  // through to the entity-click toggle.
+  if (
+    activeTool.value === 'delete' &&
+    rectSelectMode.value &&
+    rectDragOrigin.value &&
+    rectDragOriginScreen.value
+  ) {
+    const [sx, sy] = rectDragOriginScreen.value;
+    const dxPx = Math.abs(e.clientX - sx);
+    const dyPx = Math.abs(e.clientY - sy);
+    if (!rectDragActive.value &&
+        (dxPx > RECT_DRAG_THRESHOLD_PX || dyPx > RECT_DRAG_THRESHOLD_PX)) {
+      rectDragActive.value = true;
+    }
+    if (rectDragActive.value) {
+      const [ox, oy] = rectDragOrigin.value;
+      dragRect.value = {
+        min_x: Math.min(ox, p[0]),
+        max_x: Math.max(ox, p[0]),
+        min_y: Math.min(oy, p[1]),
+        max_y: Math.max(oy, p[1]),
+      };
+    }
+    return;
+  }
   // Active drag (edit mode): apply snap + ortho, redraw the moving vertex.
   if (activeTool.value === 'edit' && editDragOrigin.value && editSelection.value) {
     let next: [number, number] = p;
@@ -501,6 +511,22 @@ function onCanvasMouseMove(e: MouseEvent) {
 const dragPreview = ref<[number, number] | null>(null);
 
 function onCanvasMouseDown(e: MouseEvent) {
+  // Delete-mode rect-select takes precedence over the entity click handler.
+  // We record both the DXF origin (for the SVG <rect> preview) and the raw
+  // screen coords (so the px-based drag threshold is independent of the
+  // current zoom — a 4 mm drag on a small part should still count as a
+  // click, while a 4 px drag on a huge part shouldn't be counted as click
+  // simply because 4 px happens to be a few mm).
+  if (activeTool.value === 'delete' && rectSelectMode.value && currentFile.value) {
+    const p = eventToDxf(e);
+    if (p) {
+      rectDragOrigin.value = p;
+      rectDragOriginScreen.value = [e.clientX, e.clientY];
+      rectDragActive.value = false;
+      dragRect.value = null;
+    }
+    return;
+  }
   if (activeTool.value !== 'edit') return;
   // Allow first-click-and-drag: if the user pressed on a vertex handle, select
   // it now so the subsequent mousemove drags it without requiring a separate
@@ -518,6 +544,24 @@ function onCanvasMouseDown(e: MouseEvent) {
 }
 
 function onCanvasMouseUp() {
+  // Delete-mode rect-select: commit the rect if the drag exceeded the
+  // click threshold. Otherwise leave the click handler to do its job (the
+  // browser still fires `click` after mouseup for in-place releases).
+  if (
+    activeTool.value === 'delete' &&
+    rectSelectMode.value &&
+    rectDragOrigin.value
+  ) {
+    if (rectDragActive.value && dragRect.value && currentFileId.value) {
+      selectByRect(currentFileId.value, dragRect.value, rectSelectInvert.value);
+      _rectJustCommitted = true;
+    }
+    rectDragOrigin.value = null;
+    rectDragOriginScreen.value = null;
+    rectDragActive.value = false;
+    dragRect.value = null;
+    return;
+  }
   if (
     activeTool.value === 'edit' &&
     editSelection.value &&
@@ -1112,6 +1156,23 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
             :cy="liveCursor[1]"
             :r="overlayScale * 3"
           />
+
+          <!-- Rect-select rubber band (delete mode only). The wrapping
+               Y-flip group is the same one entity rendering lives in, so the
+               rect drawn here is in DXF (Y-up) coordinates and aligns with
+               the entities the operator is sweeping over. The ``invert``
+               variant uses a different stroke colour so the operator can
+               tell at a glance whether the rect is "select inside" or
+               "select outside". -->
+          <rect
+            v-if="dragRect"
+            class="selection-box"
+            :class="{ invert: rectSelectInvert }"
+            :x="dragRect.min_x"
+            :y="dragRect.min_y"
+            :width="dragRect.max_x - dragRect.min_x"
+            :height="dragRect.max_y - dragRect.min_y"
+          />
         </g>
       </template>
 
@@ -1485,6 +1546,25 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
   stroke-width: 0.8;
   opacity: 0.8;
   pointer-events: none;
+}
+
+/* 削除モード — 矩形範囲選択のラバーバンド。
+   - 既定 (範囲内モード): cyan 破線 + 薄い cyan の塗りつぶし
+   - invert (範囲外モード): amber 破線 + 薄い amber 塗りつぶし
+   どちらも pointer-events:none なので、ドラッグ中のヒットテストには影響しない。
+   stroke-dasharray は v3 の dim-preview と同じ 4 3 パターンに揃えて、CAD らしい
+   選択ボックスの見た目になる。 */
+:deep(.selection-box) {
+  fill: rgba(77, 207, 224, 0.08);
+  stroke: var(--cy);
+  stroke-width: 0.8;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+:deep(.selection-box.invert) {
+  fill: rgba(245, 166, 35, 0.08);
+  stroke: var(--am);
 }
 
 /* Note text-input modal — anchored mid-canvas, matches v3 .editor cadence

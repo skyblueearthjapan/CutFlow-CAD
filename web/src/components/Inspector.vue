@@ -33,6 +33,12 @@ const {
   toggleCategory,
   isCategoryOn,
   clearSelection,
+  rectSelectMode,
+  rectSelectInvert,
+  protectOuterFromRect,
+  setRectSelectMode,
+  setRectInvert,
+  setProtectOuterFromRect,
   executeDelete,
   isDeleting,
   // Phase 2
@@ -146,6 +152,13 @@ const deletePillText = computed(() => {
   if (!currentFile.value) return meta.value.pill.text;
   return `${totalDeleteCandidates.value} 件`;
 });
+
+/** Toggle handler for the rect-select sub-mode button. The store reset
+ *  logic (clears invert when turning off) keeps the panel in a predictable
+ *  shape so users always come back to "inside" mode as the default. */
+function toggleRectMode(): void {
+  setRectSelectMode(!rectSelectMode.value);
+}
 
 /* -------------------- Phase 2 — outer helpers ---------------------------- */
 
@@ -915,6 +928,58 @@ watch(
             >
               {{ isCleaningFrame ? '検出中…' : '製作図枠を自動検出して削除' }}
             </button>
+          </div>
+
+          <!-- 矩形範囲で選択 — カテゴリ別では拾えない表題欄テキストや注記を
+               一掃するためのキャンバス側ツール。本体は CanvasArea.vue が
+               mousedown/mousemove/mouseup で受けて store の selectByRect に
+               コミットする。invert を ON にすると「矩形の外」(=部品だけ
+               残す) 選択に切り替わる。 -->
+          <div v-if="currentFile" class="section-block rect-block">
+            <h6 class="lbl">矩形範囲で選択</h6>
+            <div class="rect-tools">
+              <button
+                :class="['toggle-btn', rectSelectMode ? 'on' : '']"
+                @click="toggleRectMode"
+              >
+                {{ rectSelectMode ? '✓ 矩形選択 ON' : '矩形選択 OFF' }}
+              </button>
+              <div v-if="rectSelectMode" class="rect-mode-switch">
+                <label>
+                  <input
+                    type="radio"
+                    name="rect-invert"
+                    :checked="!rectSelectInvert"
+                    @change="setRectInvert(false)"
+                  />
+                  範囲内を選択
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="rect-invert"
+                    :checked="rectSelectInvert"
+                    @change="setRectInvert(true)"
+                  />
+                  範囲外を選択 (部品だけ残す)
+                </label>
+                <label v-if="rectSelectInvert" class="rect-protect">
+                  <input
+                    type="checkbox"
+                    :checked="protectOuterFromRect"
+                    @change="setProtectOuterFromRect(
+                      ($event.target as HTMLInputElement).checked
+                    )"
+                  />
+                  外径を保護 (推奨)
+                </label>
+              </div>
+            </div>
+            <p v-if="rectSelectMode" class="lead">
+              キャンバス上でドラッグ →
+              <em>{{ rectSelectInvert ? '矩形の外' : '矩形の内' }}</em>
+              の要素を選択リストに追加
+            </p>
           </div>
           <div
             v-if="lastFrameCleanup"
@@ -1751,6 +1816,74 @@ watch(
 </template>
 
 <style scoped>
+/* 矩形範囲削除 — v3 トークン (--cy / --am / --line-2 / --r-md / --t-2 / --t-3)
+   準拠で、既存の .section-block / .lead と違和感なく並ぶように。
+   .toggle-btn は色別チェックの .ent-row と同じ高さ感 (28px) で揃え、ON で
+   cyan 縁取り + 軽いハイライト。ラジオは v3 既定のフォーム要素のため
+   accent-color のみ統一する。 */
+.rect-block { margin-top: 10px; }
+.rect-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--t-3);
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.toggle-btn:hover {
+  color: var(--t-2);
+  border-color: var(--line-3);
+}
+.toggle-btn.on {
+  color: var(--cy);
+  border-color: var(--cy);
+  background: rgba(77, 207, 224, 0.08);
+}
+.rect-mode-switch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.rect-mode-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--t-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.rect-mode-switch input[type="radio"],
+.rect-mode-switch input[type="checkbox"] {
+  accent-color: var(--cy);
+  margin: 0;
+}
+.rect-mode-switch label.rect-protect {
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line-2);
+  color: var(--t-3);
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+}
+
 /* Phase 4 — Per-row delete affordance (× button on dim/hole/note/bridge
    added-item rows). Sized to slot into the .edge-row's ``auto`` trailing
    column without disturbing the v3 row height. */
