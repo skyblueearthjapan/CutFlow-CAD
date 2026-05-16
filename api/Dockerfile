@@ -12,6 +12,8 @@ RUN apt-get update \
         gcc \
         g++ \
         libgeos-dev \
+        fonts-dejavu-core \
+        fonts-liberation \
         fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/*
 
@@ -27,6 +29,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Application code
 COPY . .
+
+# Build ezdxf font cache eagerly so the first /render-svg call doesn't pay
+# the 30+ second scan cost (and so it doesn't run as root mid-request).
+RUN python -c "from ezdxf.fonts import fonts; fonts.build_system_fonts_cache()"
 
 # Drop privileges
 RUN chown -R appuser:appuser /app

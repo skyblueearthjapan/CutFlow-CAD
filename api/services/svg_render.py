@@ -265,8 +265,30 @@ def render_dxf_to_svg(
             msp, finalize=True, filter_func=filter_func
         )
     except Exception as exc:  # noqa: BLE001 - ezdxf drawing can fail on broken DXFs
-        log.exception("ezdxf SVG render failed for %s", path)
-        raise RuntimeError(f"svg render failed: {exc}") from exc
+        # FontNotFoundError is common in slim containers when fonts haven't
+        # been installed yet. Retry once with text policy that converts
+        # MTEXT to placeholder rectangles, so the user still sees geometry.
+        from ezdxf.fonts.font_manager import FontNotFoundError
+        if isinstance(exc, FontNotFoundError):
+            log.warning("ezdxf has no fonts — retrying render with MTEXT placeholders")
+            try:
+                from ezdxf.addons.drawing.properties import MTextPolicy
+                backend = SVGBackend()
+                cfg2 = Configuration(
+                    background_policy=BackgroundPolicy.OFF if dark_theme else BackgroundPolicy.PAPERSPACE,
+                    color_policy=ColorPolicy.MONOCHROME_DARK_BG if dark_theme else ColorPolicy.COLOR,
+                    lineweight_policy=LineweightPolicy.RELATIVE,
+                    mtext_policy=MTextPolicy.RECT,
+                )
+                Frontend(ctx, backend, config=cfg2).draw_layout(
+                    msp, finalize=True, filter_func=filter_func
+                )
+            except Exception as exc2:  # noqa: BLE001
+                log.exception("ezdxf SVG render failed even with MTEXT placeholders for %s", path)
+                raise RuntimeError(f"svg render failed: {exc2}") from exc2
+        else:
+            log.exception("ezdxf SVG render failed for %s", path)
+            raise RuntimeError(f"svg render failed: {exc}") from exc
 
     # ``Page(0, 0)`` triggers auto-detection from the content bounding box,
     # which is exactly what we want for an interactive canvas overlay.
