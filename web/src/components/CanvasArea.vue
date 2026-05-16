@@ -86,11 +86,104 @@ onUnmounted(() => {
   if (timer !== undefined) window.clearInterval(timer);
 });
 
-/** viewBox + Y-flip transform derived from the active file's bounding box. */
+/** Compute axis-aligned bbox for a single entity. Returns null if unknown. */
+function entityBbox(
+  e: { type: string; geom: any },
+): { min_x: number; min_y: number; max_x: number; max_y: number } | null {
+  const g = e.geom;
+  if (!g) return null;
+  const num = (v: any): number =>
+    typeof v === 'number' && Number.isFinite(v) ? v : Number.NaN;
+  switch (e.type) {
+    case 'LINE': {
+      const x1 = num(g.x1), x2 = num(g.x2), y1 = num(g.y1), y2 = num(g.y2);
+      if ([x1, x2, y1, y2].some(Number.isNaN)) return null;
+      return {
+        min_x: Math.min(x1, x2), max_x: Math.max(x1, x2),
+        min_y: Math.min(y1, y2), max_y: Math.max(y1, y2),
+      };
+    }
+    case 'CIRCLE':
+    case 'ARC': {
+      const cx = num(g.cx), cy = num(g.cy), r = num(g.r);
+      if ([cx, cy, r].some(Number.isNaN)) return null;
+      return { min_x: cx - r, max_x: cx + r, min_y: cy - r, max_y: cy + r };
+    }
+    case 'LWPOLYLINE':
+    case 'POLYLINE': {
+      const vs = g.vertices;
+      if (!Array.isArray(vs) || vs.length === 0) return null;
+      let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+      for (const v of vs) {
+        if (!Array.isArray(v) || v.length < 2) continue;
+        const x = num(v[0]), y = num(v[1]);
+        if (Number.isNaN(x) || Number.isNaN(y)) continue;
+        if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+        if (y < mny) mny = y; if (y > mxy) mxy = y;
+      }
+      if (!Number.isFinite(mnx)) return null;
+      return { min_x: mnx, min_y: mny, max_x: mxx, max_y: mxy };
+    }
+    case 'POINT':
+    case 'INSERT':
+    case 'TEXT':
+    case 'MTEXT': {
+      const x = num(g.x), y = num(g.y);
+      if (Number.isNaN(x) || Number.isNaN(y)) return null;
+      return { min_x: x, min_y: y, max_x: x, max_y: y };
+    }
+    case 'ELLIPSE': {
+      const cx = num(g.cx), cy = num(g.cy);
+      const mx = num(g.major_x ?? 0), my = num(g.major_y ?? 0);
+      const ratio = num(g.ratio ?? 1);
+      if ([cx, cy].some(Number.isNaN)) return null;
+      const a = Math.hypot(mx, my);
+      const b = a * (Number.isFinite(ratio) ? ratio : 1);
+      const r = Math.max(a, b);
+      return { min_x: cx - r, max_x: cx + r, min_y: cy - r, max_y: cy + r };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Bounding box that *ignores* annotation/frame entities so the viewBox
+ *  zooms to the actual part rather than the surrounding production frame.
+ *  Falls back to the server-reported bbox when nothing usable is found. */
+const partBoundingBox = computed(() => {
+  const f = currentFile.value;
+  if (!f) return null;
+  // Categories that represent the real part geometry. We exclude `dim`,
+  // `balloon`, `tap`, and `frame` so the title block / dimension lines
+  // can't blow up the viewBox.
+  const partCats = new Set(['outer', 'hole', 'other']);
+  let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+  let used = 0;
+  for (const e of f.entities) {
+    if (!partCats.has(e.category)) continue;
+    // Skip TEXT/MTEXT/INSERT entities even when they happen to be 'other' —
+    // a free-floating note must not stretch the viewBox.
+    if (e.type === 'TEXT' || e.type === 'MTEXT' || e.type === 'INSERT' ||
+        e.type === 'DIMENSION' || e.type === 'LEADER') continue;
+    const bb = entityBbox(e);
+    if (!bb) continue;
+    if (bb.min_x < mnx) mnx = bb.min_x;
+    if (bb.min_y < mny) mny = bb.min_y;
+    if (bb.max_x > mxx) mxx = bb.max_x;
+    if (bb.max_y > mxy) mxy = bb.max_y;
+    used++;
+  }
+  if (used === 0 || !Number.isFinite(mnx) || mxx - mnx <= 0 || mxy - mny <= 0) {
+    return f.bounding_box; // fallback
+  }
+  return { min_x: mnx, min_y: mny, max_x: mxx, max_y: mxy };
+});
+
+/** viewBox + Y-flip transform derived from the part bbox (zoomed to part). */
 const viewBox = computed(() => {
   const f = currentFile.value;
   if (!f) return '0 0 1200 800';
-  const bb = f.bounding_box;
+  const bb = partBoundingBox.value ?? f.bounding_box;
   const w = bb.max_x - bb.min_x;
   const h = bb.max_y - bb.min_y;
   // Add 8% margin around the drawing.

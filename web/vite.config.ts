@@ -15,10 +15,16 @@ export default defineConfig({
     // Tailscale Funnel / Cloudflare Tunnel など任意ホストからの
     // dev server アクセスを許可 (本番では nginx 等で配信する想定)。
     allowedHosts: true,
-    hmr: {
-      host: 'localhost',
-      port: 5173,
-    },
+    // HMR を実体ホスト経由で動かすには `VITE_HMR_HOST` を設定 (例:
+    // `cutflow.tailaa1b31.ts.net`)。未設定なら HMR を完全に無効化して
+    // ERR_SSL_PROTOCOL_ERROR を回避する (Funnel 経由では HMR は使えない)。
+    hmr: process.env.VITE_HMR_HOST
+      ? {
+          protocol: 'wss',
+          host: process.env.VITE_HMR_HOST,
+          clientPort: 443,
+        }
+      : false,
     watch: {
       // Docker 上で動かす場合に必要 (inotify が効かない環境向け)
       usePolling: true,
