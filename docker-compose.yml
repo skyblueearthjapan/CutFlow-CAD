@@ -1,0 +1,44 @@
+# Phase 0: docker-compose up で localhost:5173 (web) と localhost:8080 (api) が起動
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: cutflow-cad-api:dev
+    container_name: cutflow-cad-api
+    ports:
+      - "8080:8080"
+    volumes:
+      # ホストのソースを bind mount。--reload でホットリロード
+      - ./api:/app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/api/health').getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: cutflow-cad-web:dev
+    container_name: cutflow-cad-web
+    ports:
+      - "5173:5173"
+    volumes:
+      # ホストのソースを bind mount。HMR を効かせる。
+      - ./web:/app
+      # node_modules はコンテナ側を優先 (ホストの OS 差異を避ける)
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      # Docker 上では polling watcher が必要 (vite.config.ts でも有効化)
+      - CHOKIDAR_USEPOLLING=true
+    command: ["npm", "run", "dev"]
+    depends_on:
+      - api
+    restart: unless-stopped

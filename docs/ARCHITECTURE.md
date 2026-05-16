@@ -64,6 +64,9 @@
 | **vanilla CSS + CSS変数** | デザインシステム (v3) との完全一致を保つ |
 
 ### ディレクトリ構造（予定）
+
+> **Note**: 以下は最終形の構造案。Phase 0時点では、Canvas → CanvasArea, components.css 単一ファイル等、簡略化された形で実装されている。Phase 1以降で本構造に近づけていく。
+
 ```
 web/
 ├─ index.html

@@ -1,0 +1,25 @@
+# Python build artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Version control & env
+.git
+.gitignore
+.env
+.env.*
+
+# Docs (not needed inside image)
+README.md
+docs/
+
+# Virtual envs & build artifacts
+venv/
+.venv/
+*.egg-info
+dist/
+build/

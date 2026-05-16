@@ -1,0 +1,42 @@
+/* ================================================================
+   CutFlow CAD — Design Tokens (v3)
+   mockups/index.html の :root をそのまま移植。値は変更禁止。
+================================================================ */
+:root {
+  --bg-0: #08090d;
+  --bg-1: #0b0e13;
+  --bg-2: #0f141b;
+  --bg-3: #131a23;
+  --bg-4: #1a222e;
+  --bg-5: #232d3b;
+
+  --line-1: #1a212b;
+  --line-2: #232c39;
+  --line-3: #2c3747;
+
+  --t-1: #eef1f6;
+  --t-2: #b6bdc8;
+  --t-3: #7a8390;
+  --t-4: #525a67;
+
+  --cy: #4dcfe0;
+  --cy-2: #2bb1c0;
+  --cy-soft: rgba(77, 207, 224, 0.12);
+  --cy-glow: rgba(77, 207, 224, 0.35);
+
+  --am: #f5a623;
+  --am-soft: rgba(245, 166, 35, 0.13);
+
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #ef4444;
+  --chamfer: #a78bfa;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --f-sans: "IBM Plex Sans", "Noto Sans JP", -apple-system, sans-serif;
+  --f-jp: "Noto Sans JP", -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
+}

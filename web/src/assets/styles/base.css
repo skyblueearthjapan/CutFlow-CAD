@@ -1,0 +1,17 @@
+/* ================================================================
+   CutFlow CAD — Base reset + global typography
+   mockups/index.html の冒頭リセット部をそのまま移植。
+================================================================ */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg-1); }
+body {
+  font-family: var(--f-sans);
+  color: var(--t-1);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  font-feature-settings: "tnum";
+}
+
+#app { height: 100%; }
