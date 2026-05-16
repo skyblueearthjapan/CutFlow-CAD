@@ -30,9 +30,14 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Application code
 COPY . .
 
-# Build ezdxf font cache eagerly so the first /render-svg call doesn't pay
-# the 30+ second scan cost (and so it doesn't run as root mid-request).
-RUN python -c "from ezdxf.fonts import fonts; fonts.build_system_fonts_cache()"
+# Eagerly build ezdxf font cache so the first /render-svg call doesn't pay
+# the 30+ second scan cost. Swallow failures — the runtime fallback retries
+# with MTEXT placeholders if no fonts are found.
+RUN python -c "import ezdxf; ezdxf.options.use_matplotlib = False; \
+from ezdxf.fonts import fonts as _f; \
+[fn() for fn in (getattr(_f, 'build_system_fonts_cache', None),) if fn] \
+or [print('font cache helper not in this ezdxf version')]" \
+ || echo 'font cache build skipped'
 
 # Drop privileges
 RUN chown -R appuser:appuser /app
