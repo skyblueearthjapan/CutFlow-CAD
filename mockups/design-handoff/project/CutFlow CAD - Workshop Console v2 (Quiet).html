@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>CutFlow CAD — Workshop Console (Quiet)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ================================================================
+   CutFlow CAD — Workshop Console v2 (Quiet edition)
+   引き算で作り直し
+   ・5段グリッド → 3段グリッド
+   ・左プロジェクトパネル / フェーズリボン / 左レール / 凡例 / ミニマップ / ヘッダ装飾 を削除
+   ・キャンバスを画面の支配的要素として復元
+================================================================ */
+
+:root {
+  --bg-0: #08090d;
+  --bg-1: #0b0e13;
+  --bg-2: #0f141b;
+  --bg-3: #131a23;
+  --bg-4: #1a222e;
+  --bg-5: #232d3b;
+
+  --line-1: #1a212b;
+  --line-2: #232c39;
+  --line-3: #2c3747;
+
+  --t-1: #eef1f6;
+  --t-2: #b6bdc8;
+  --t-3: #7a8390;
+  --t-4: #525a67;
+
+  --cy: #4dcfe0;
+  --cy-2: #2bb1c0;
+  --cy-soft: rgba(77, 207, 224, 0.12);
+  --cy-glow: rgba(77, 207, 224, 0.35);
+
+  --am: #f5a623;
+  --am-soft: rgba(245, 166, 35, 0.13);
+
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #ef4444;
+  --chamfer: #a78bfa;
+
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --f-sans: "IBM Plex Sans", "Noto Sans JP", -apple-system, sans-serif;
+  --f-jp: "Noto Sans JP", -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg-1); }
+body {
+  font-family: var(--f-sans);
+  color: var(--t-1);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  font-feature-settings: "tnum";
+}
+
+/* ============== APP — 3-row grid ============== */
+.app {
+  display: grid;
+  grid-template-rows: 44px 1fr 30px 22px;
+  height: 100vh;
+}
+
+/* ============== HEADER ============== */
+.header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  padding: 0 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-2);
+  gap: 16px;
+}
+.brand {
+  display: flex; align-items: center; gap: 14px;
+}
+.brand-mark {
+  width: 24px; height: 24px;
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--line-3);
+  border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.brand-mark::before {
+  content: ""; position: absolute;
+  inset: 5px;
+  border: 1.5px solid var(--cy);
+  border-radius: 1px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 8px var(--cy-glow);
+}
+.brand-mark::after {
+  content: ""; position: absolute;
+  width: 5px; height: 5px;
+  background: var(--cy);
+  border-radius: 1px;
+}
+.brand-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+  color: var(--t-1);
+}
+.brand-name em { font-style: normal; color: var(--cy); font-weight: 700; }
+
+.title-block {
+  display: flex; align-items: center; gap: 10px;
+  justify-self: center;
+  padding: 0 18px;
+  height: 28px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  color: var(--t-3);
+}
+.title-block .pn { color: var(--t-4); }
+.title-block b { color: var(--t-1); font-weight: 500; }
+.title-block .mat {
+  color: var(--cy);
+  border-left: 1px solid var(--line-2);
+  padding-left: 10px;
+  font-weight: 500;
+}
+
+.actions {
+  display: flex; align-items: center; gap: 8px;
+}
+.kbd-hint {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 26px; padding: 0 10px 0 9px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--t-3);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color .15s, border-color .15s;
+}
+.kbd-hint:hover { color: var(--t-1); border-color: var(--line-3); }
+.kbd-hint svg { width: 11px; height: 11px; }
+.kbd-hint .kbd {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  background: var(--bg-4);
+  color: var(--t-2);
+  padding: 1px 5px;
+  border-radius: 2px;
+  border: 1px solid var(--line-3);
+}
+.btn {
+  height: 28px; padding: 0 14px;
+  background: transparent;
+  color: var(--t-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.btn:hover { background: var(--bg-3); border-color: var(--line-3); }
+.btn svg { width: 12px; height: 12px; }
+.btn.primary {
+  background: linear-gradient(180deg, var(--cy) 0%, var(--cy-2) 100%);
+  color: #061013;
+  border-color: var(--cy);
+  font-weight: 600;
+  box-shadow: 0 4px 12px -4px rgba(77,207,224,0.35);
+}
+.btn.primary:hover { box-shadow: 0 0 0 3px var(--cy-soft), 0 4px 14px -2px rgba(77,207,224,0.5); }
+
+.user-chip {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2bb1c0, #1a4f5a);
+  color: #061013;
+  font-family: var(--f-mono);
+  font-size: 10px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-left: 4px;
+}
+
+/* ============== MAIN — canvas + right panel ============== */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  overflow: hidden;
+}
+
+/* ----- CANVAS ----- */
+.canvas-area {
+  position: relative;
+  overflow: hidden;
+  background: radial-gradient(ellipse 80% 60% at 50% 45%, #131b25 0%, #0a0e14 60%, #08090d 100%);
+}
+
+/* Subtle technical grid */
+.canvas-area::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(77,207,224,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(77,207,224,0.035) 1px, transparent 1px);
+  background-size: 80px 80px;
+  pointer-events: none;
+}
+/* Subtle finer grid */
+.canvas-area::after {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(77,207,224,0.01) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(77,207,224,0.01) 1px, transparent 1px);
+  background-size: 16px 16px;
+  pointer-events: none;
+}
+
+/* Floating compact toolbar (top center) — combines view tools + zoom */
+.c-tools {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex; align-items: center;
+  background: rgba(15, 20, 27, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: 3px;
+  gap: 1px;
+  box-shadow: 0 6px 20px -6px rgba(0,0,0,0.6);
+  z-index: 4;
+}
+.c-tools .sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 4px; }
+.c-tools button {
+  height: 26px;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--t-3);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  font-family: inherit;
+}
+.c-tools button:hover { background: var(--bg-4); color: var(--t-1); }
+.c-tools button.active { background: var(--cy-soft); color: var(--cy); }
+.c-tools button svg { width: 13px; height: 13px; }
+.c-tools .zv {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--t-1);
+  min-width: 44px;
+  text-align: center;
+}
+
+/* Bottom-left meta — single line of truth */
+.c-meta {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--t-3);
+  display: flex; align-items: center; gap: 18px;
+  padding: 0 4px;
+  z-index: 4;
+  pointer-events: none;
+}
+.c-meta b { color: var(--t-1); font-weight: 500; }
+.c-meta .cy { color: var(--cy); }
+.c-meta .sep { color: var(--line-3); }
+
+/* Bottom-right summary — quiet but always available */
+.c-summary {
+  position: absolute;
+  bottom: 14px;
+  right: 14px;
+  display: flex; gap: 14px;
+  align-items: baseline;
+  font-family: var(--f-mono);
+  z-index: 4;
+}
+.c-summary .item {
+  text-align: right;
+}
+.c-summary .item .lbl {
+  font-size: 9px;
+  color: var(--t-4);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 1px;
+}
+.c-summary .item .val {
+  font-size: 13px;
+  color: var(--t-1);
+  font-weight: 500;
+}
+.c-summary .item.time .val { color: var(--am); }
+.c-summary .item .u { font-size: 9.5px; color: var(--t-4); margin-left: 2px; font-weight: 400; }
+.c-summary .sep {
+  width: 1px;
+  height: 22px;
+  background: var(--line-2);
+  align-self: center;
+}
+
+/* Canvas SVG */
+.canvas-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+}
+
+/* Banner: contextual alert (only when needed) */
+.c-banner {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(245,166,35,0.08);
+  border: 1px solid rgba(245,166,35,0.35);
+  color: var(--am);
+  padding: 7px 14px;
+  border-radius: var(--r-md);
+  font-size: 11.5px;
+  z-index: 5;
+  display: none;
+  align-items: center; gap: 10px;
+  backdrop-filter: blur(10px);
+}
+.c-banner.show { display: flex; }
+.c-banner b { font-weight: 600; }
+.c-banner svg { width: 14px; height: 14px; }
+
+/* ============== ENTITY STYLES ============== */
+.ent { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.ent.outer { stroke: var(--cy); stroke-width: 2.0; filter: drop-shadow(0 0 3px rgba(77,207,224,0.3)); }
+.ent.hole  { stroke: var(--cy); stroke-width: 1.5; }
+.ent.dim, .ent.balloon, .ent.frame { stroke: var(--am); stroke-width: 0.9; opacity: 0.85; }
+.ent.tap { stroke: var(--am); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.85; }
+.ent.balloon-circle { fill: rgba(245,166,35,0.06); stroke: var(--am); stroke-width: 0.9; }
+
+.ent.offset { stroke: var(--cy); stroke-width: 1.2; stroke-dasharray: 5 4; opacity: 0.3; transition: opacity .25s, stroke-width .25s; }
+.offset-fill { fill: rgba(77,207,224,0.05); opacity: 0; transition: opacity .25s; }
+
+.ent.chamfer { stroke: var(--chamfer); stroke-width: 2; opacity: 0; transition: opacity .25s; }
+.ent.chamfer-glyph { stroke: var(--chamfer); stroke-width: 1.2; opacity: 0; transition: opacity .25s; }
+
+.cut-node circle { fill: var(--bg-1); stroke: var(--cy); stroke-width: 1.2; }
+.cut-node text { fill: var(--cy); font-family: var(--f-mono); font-size: 9px; font-weight: 600; }
+
+.outer-anim {
+  stroke: var(--cy);
+  stroke-width: 0.8;
+  stroke-dasharray: 5 7;
+  fill: none;
+  opacity: 0.6;
+  animation: dash 9s linear infinite;
+}
+@keyframes dash { to { stroke-dashoffset: -200; } }
+
+text.lbl  { font-family: var(--f-mono); font-size: 9px; fill: var(--t-4); }
+text.lbl-am { font-family: var(--f-mono); font-size: 9px; fill: var(--am); }
+
+/* Mode states */
+body[data-mode="outer"] .ent.outer { stroke-width: 2.4; filter: drop-shadow(0 0 5px var(--cy-glow)); }
+body[data-mode="outer"] .ent.hole { opacity: 0.5; }
+body[data-mode="delete"] .ent.dim,
+body[data-mode="delete"] .ent.balloon,
+body[data-mode="delete"] .ent.tap,
+body[data-mode="delete"] .ent.frame,
+body[data-mode="delete"] .ent.balloon-circle { stroke-width: 1.2; opacity: 1; }
+body[data-mode="delete"] .ent.outer { opacity: 0.55; filter: none; }
+body[data-mode="delete"] .ent.hole { opacity: 0.45; }
+body[data-mode="offset"] .ent.offset { opacity: 1; stroke-width: 1.5; }
+body[data-mode="offset"] .offset-fill { opacity: 1; }
+body[data-mode="offset"] .ent.outer { stroke-width: 1.6; }
+body[data-mode="offset"] .ent:not(.outer):not(.offset):not(.hole) { opacity: 0.3; }
+body[data-mode="chamfer"] .ent.chamfer { opacity: 1; }
+body[data-mode="chamfer"] .ent.chamfer-glyph { opacity: 1; }
+body[data-mode="chamfer"] .ent.outer { stroke-width: 1.6; }
+body[data-mode="chamfer"] .ent:not(.outer):not(.chamfer):not(.chamfer-glyph):not(.hole) { opacity: 0.3; }
+
+/* ============== RIGHT PANEL ============== */
+.editor {
+  background: var(--bg-2);
+  border-left: 1px solid var(--line-1);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.mode-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-1);
+}
+.mode-btn {
+  height: 60px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 5px;
+  color: var(--t-3);
+  font-family: inherit;
+  font-size: 11px;
+  position: relative;
+  transition: color .15s, background .15s;
+  border-right: 1px solid var(--line-1);
+}
+.mode-btn:last-child { border-right: none; }
+.mode-btn:hover { background: var(--bg-3); color: var(--t-1); }
+.mode-btn svg { width: 17px; height: 17px; }
+.mode-btn.active {
+  background: linear-gradient(180deg, rgba(77,207,224,0.04) 0%, transparent 100%);
+  color: var(--cy);
+}
+.mode-btn.active::after {
+  content: "";
+  position: absolute;
+  left: 8px; right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--cy);
+  border-radius: 1px;
+  box-shadow: 0 0 8px var(--cy-glow);
+}
+
+.mode-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 20px 24px;
+}
+
+.section-head-r {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 6px;
+  gap: 10px;
+}
+.section-head-r h4 {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--t-1);
+}
+.pill {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+.pill.cy { background: var(--cy-soft); color: var(--cy); border: 1px solid rgba(77,207,224,0.25); }
+.pill.am { background: var(--am-soft); color: var(--am); border: 1px solid rgba(245,166,35,0.25); }
+.pill.ok { background: rgba(52,211,153,0.1); color: var(--ok); border: 1px solid rgba(52,211,153,0.25); }
+.pill.ch { background: rgba(167,139,250,0.1); color: var(--chamfer); border: 1px solid rgba(167,139,250,0.3); }
+
+.lead {
+  font-size: 11.5px;
+  color: var(--t-3);
+  line-height: 1.65;
+  margin: 8px 0 20px;
+}
+.lead em { color: var(--cy); font-style: normal; }
+
+.kv {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-1);
+}
+.kv:last-child { border-bottom: none; }
+.kv .k { font-size: 12px; color: var(--t-1); }
+.kv .ksub {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-4);
+  margin-top: 2px;
+}
+.kv .v {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--t-1);
+}
+
+.num-step {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--bg-3);
+}
+.num-step button {
+  width: 26px;
+  background: transparent;
+  border: none;
+  color: var(--t-3);
+  cursor: pointer;
+  font-family: var(--f-mono);
+  font-size: 12px;
+}
+.num-step button:hover { background: var(--bg-4); color: var(--t-1); }
+.num-step input {
+  width: 56px;
+  text-align: center;
+  background: var(--bg-2);
+  border: none;
+  border-left: 1px solid var(--line-2);
+  border-right: 1px solid var(--line-2);
+  color: var(--t-1);
+  font-family: var(--f-mono);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+.num-step .unit {
+  display: flex; align-items: center;
+  padding: 0 8px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-4);
+  background: var(--bg-3);
+  border-left: 1px solid var(--line-2);
+}
+
+.entity-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.ent-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.ent-row:hover { border-color: var(--line-3); }
+.ent-row .cb {
+  width: 14px; height: 14px;
+  border: 1px solid var(--line-3);
+  border-radius: 2px;
+  background: var(--bg-2);
+  position: relative;
+}
+.ent-row.on .cb { background: var(--cy); border-color: var(--cy); }
+.ent-row.on .cb::after {
+  content: "";
+  position: absolute;
+  left: 4px; top: 1px;
+  width: 4px; height: 7px;
+  border: solid #061013;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.ent-row .nm { font-size: 12px; color: var(--t-1); }
+.ent-row .ns { font-family: var(--f-mono); font-size: 9.5px; color: var(--t-4); margin-top: 1px; }
+.ent-row .cnt {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--t-2);
+  background: var(--bg-2);
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--line-2);
+  min-width: 36px;
+  text-align: center;
+}
+.ent-row.on .cnt { color: var(--am); border-color: rgba(245,166,35,0.3); }
+
+.action-row { display: flex; gap: 8px; margin-top: 16px; }
+.action-btn {
+  flex: 1;
+  height: 32px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--t-2);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  transition: background .15s, border-color .15s;
+}
+.action-btn:hover { background: var(--bg-4); color: var(--t-1); border-color: var(--line-3); }
+.action-btn.danger { color: var(--am); border-color: rgba(245,166,35,0.4); }
+.action-btn.danger:hover { background: var(--am-soft); }
+.action-btn.cy { color: var(--cy); border-color: rgba(77,207,224,0.4); }
+.action-btn.cy:hover { background: var(--cy-soft); }
+.action-btn svg { width: 12px; height: 12px; }
+
+.edge-list { display: flex; flex-direction: column; margin-top: 4px; }
+.edge-row {
+  display: grid;
+  grid-template-columns: 26px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--line-1);
+}
+.edge-row:hover { background: var(--bg-3); }
+.edge-row .ix {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  color: var(--t-4);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  text-align: center;
+  padding: 2px 0;
+}
+.edge-row .nm { font-size: 11.5px; color: var(--t-1); }
+.edge-row .ns { font-family: var(--f-mono); font-size: 9.5px; color: var(--t-4); }
+.edge-row .val { font-family: var(--f-mono); font-size: 11px; color: var(--cy); }
+
+.summary {
+  margin-top: 18px;
+  background: linear-gradient(180deg, rgba(77,207,224,0.04) 0%, rgba(77,207,224,0) 100%);
+  border: 1px solid rgba(77,207,224,0.18);
+  border-radius: var(--r-md);
+  padding: 14px;
+}
+.summary h6 {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cy);
+  margin-bottom: 10px;
+  display: flex; align-items: center; gap: 6px;
+}
+.summary h6::before {
+  content: ""; width: 6px; height: 6px;
+  background: var(--cy);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--cy-glow);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.summary-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 5px 0;
+  font-family: var(--f-mono);
+  font-size: 11px;
+}
+.summary-row .k { color: var(--t-3); }
+.summary-row .v { color: var(--t-1); font-weight: 500; }
+.summary-row .v.big { font-size: 14px; color: var(--cy); }
+.summary-row .u { color: var(--t-4); font-size: 10px; margin-left: 2px; }
+
+.warn-strip {
+  margin-top: 14px;
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid rgba(245,166,35,0.3);
+  background: var(--am-soft);
+  border-radius: var(--r-md);
+  color: var(--am);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.warn-strip svg { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; }
+.warn-strip b { color: var(--am); font-weight: 600; }
+
+.section-block { margin-bottom: 22px; }
+.section-block:last-child { margin-bottom: 0; }
+.section-block h6.lbl {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--t-4);
+  margin: 0 0 10px;
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.section-block h6.lbl .right {
+  color: var(--t-3);
+  letter-spacing: 0.04em;
+  text-transform: none;
+  font-size: 10px;
+}
+
+.corner-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.corner-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: 99px;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--t-2);
+  cursor: pointer;
+}
+.corner-chip:hover { border-color: var(--line-3); }
+.corner-chip.on {
+  background: rgba(167,139,250,0.1);
+  border-color: rgba(167,139,250,0.5);
+  color: var(--chamfer);
+}
+.corner-chip .dot {
+  width: 5px; height: 5px;
+  background: var(--line-3);
+  border-radius: 50%;
+}
+.corner-chip.on .dot { background: var(--chamfer); box-shadow: 0 0 4px rgba(167,139,250,0.6); }
+
+/* ============== TABS (DXF switcher) — bottom ============== */
+.tabs {
+  background: var(--bg-2);
+  border-top: 1px solid var(--line-1);
+  display: flex; align-items: stretch;
+  overflow-x: auto;
+}
+.tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 14px;
+  border-right: 1px solid var(--line-1);
+  font-size: 11.5px;
+  color: var(--t-3);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: background .15s, color .15s;
+}
+.tab .tn {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  color: var(--t-4);
+}
+.tab .ts {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ok);
+}
+.tab .ts.dirty { background: var(--am); box-shadow: 0 0 5px rgba(245,166,35,0.5); }
+.tab .ts.todo { background: var(--line-3); }
+.tab:hover { background: var(--bg-3); color: var(--t-1); }
+.tab.active {
+  background: var(--bg-1);
+  color: var(--t-1);
+  font-weight: 500;
+}
+.tab.active::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--cy);
+  box-shadow: 0 0 6px var(--cy-glow);
+}
+.tab.active .tn { color: var(--cy); }
+.tab-add {
+  padding: 0 14px;
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px;
+  color: var(--t-4);
+  cursor: pointer;
+  font-family: var(--f-mono);
+}
+.tab-add:hover { color: var(--cy); }
+.tab-add svg { width: 12px; height: 12px; }
+
+/* ============== STATUS BAR ============== */
+.status {
+  background: var(--bg-2);
+  border-top: 1px solid var(--line-1);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-3);
+}
+.status-left, .status-right { display: flex; align-items: center; gap: 18px; }
+.status-item { display: flex; align-items: center; gap: 6px; }
+.status-item .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
+.status-item .dot.am { background: var(--am); }
+.status-item b { color: var(--t-1); font-weight: 500; }
+
+/* scrollbars */
+.mode-body::-webkit-scrollbar { width: 8px; }
+.mode-body::-webkit-scrollbar-track { background: transparent; }
+.mode-body::-webkit-scrollbar-thumb {
+  background: var(--line-3);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+</style>
+</head>
+
+<body data-mode="delete">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-shape" viewBox="0 0 16 16">
+      <rect x="2.5" y="3.5" width="11" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <circle cx="5" cy="6" r="0.8" fill="currentColor"/>
+      <circle cx="11" cy="10" r="0.8" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-delete" viewBox="0 0 16 16">
+      <path d="M3 5h10M6 5V3.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1V5M5 5l1 8.5a1 1 0 0 0 1 .9h2a1 1 0 0 0 1-.9L11 5" fill="none" stroke="currentColor" stroke-width="1.3"/>
+    </symbol>
+    <symbol id="i-offset" viewBox="0 0 16 16">
+      <rect x="4" y="4" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 1.5"/>
+    </symbol>
+    <symbol id="i-chamfer" viewBox="0 0 16 16">
+      <path d="M2 14 V6 L6 2 H14 M6 2 L2 6" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    </symbol>
+    <symbol id="i-output" viewBox="0 0 16 16">
+      <path d="M8 11V2M8 2 5 5M8 2l3 3M2 12v1a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-pan" viewBox="0 0 16 16">
+      <path d="M7 14V8M5 10V5a1 1 0 1 1 2 0v3M7 8V4a1 1 0 1 1 2 0v4M9 8V5a1 1 0 1 1 2 0v3M11 8V6a1 1 0 1 1 2 0v4c0 2-1.5 4-4 4-2 0-3-1-4-2L3 9c0-1 1-1.5 2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-select" viewBox="0 0 16 16">
+      <path d="m3 2 11 5-5 1-1 5-5-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-fit" viewBox="0 0 16 16">
+      <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-undo" viewBox="0 0 16 16">
+      <path d="M3 7h7a3 3 0 0 1 0 6H5M3 7l3-3M3 7l3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-redo" viewBox="0 0 16 16">
+      <path d="M13 7H6a3 3 0 0 0 0 6h5M13 7l-3-3M13 7l-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 16 16">
+      <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="m10.4 10.4 3.1 3.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 16 16">
+      <path d="M3 8h10M10 5l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-warning" viewBox="0 0 16 16">
+      <path d="m8 2 6 11H2L8 2zM8 6v3.5M8 11.4v.05" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16">
+      <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="app">
+
+  <!-- ============== HEADER ============== -->
+  <div class="header">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div class="brand-name">CutFlow<em>•</em>CAD</div>
+    </div>
+
+    <div class="title-block">
+      <span class="pn">25057 / P1 / 03</span>
+      <b>センタープレート</b>
+      <span class="mat">SS400 t9</span>
+    </div>
+
+    <div class="actions">
+      <button class="kbd-hint">
+        <svg><use href="#i-search"/></svg>
+        コマンド
+        <span class="kbd">⌘ K</span>
+      </button>
+      <button class="btn primary">
+        <svg><use href="#i-output"/></svg>
+        DXF を書き出す
+      </button>
+      <div class="user-chip">YT</div>
+    </div>
+  </div>
+
+  <!-- ============== MAIN ============== -->
+  <div class="main">
+
+    <!-- CANVAS -->
+    <section class="canvas-area">
+
+      <!-- floating toolbar -->
+      <div class="c-tools">
+        <button title="パン (Space)"><svg><use href="#i-pan"/></svg></button>
+        <button class="active" title="選択 (V)"><svg><use href="#i-select"/></svg></button>
+        <div class="sep"></div>
+        <button title="ズームアウト">−</button>
+        <span class="zv">82%</span>
+        <button title="ズームイン">+</button>
+        <button title="全体表示 (F)"><svg><use href="#i-fit"/></svg></button>
+        <div class="sep"></div>
+        <button title="元に戻す (⌘Z)"><svg><use href="#i-undo"/></svg></button>
+        <button title="やり直し (⌘⇧Z)"><svg><use href="#i-redo"/></svg></button>
+      </div>
+
+      <div class="c-banner" id="banner">
+        <svg><use href="#i-warning"/></svg>
+        <span><b>注意:</b> 外径に閉ループ未確認の箇所が1ヶ所あります。手動で線を選択してください。</span>
+      </div>
+
+      <!-- CANVAS SVG -->
+      <svg class="canvas-svg" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arr-am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--am)"/>
+          </marker>
+        </defs>
+
+        <!-- Origin -->
+        <g transform="translate(220, 660)">
+          <line x1="0" y1="0" x2="18" y2="0" stroke="var(--cy)" stroke-width="1"/>
+          <line x1="0" y1="0" x2="0" y2="-18" stroke="var(--cy)" stroke-width="1"/>
+          <circle cx="0" cy="0" r="2.5" fill="var(--cy)"/>
+          <text x="-6" y="14" font-family="IBM Plex Mono" font-size="9" fill="var(--cy)" text-anchor="end">0,0</text>
+        </g>
+
+        <!-- Offset preview -->
+        <path class="offset-fill"
+              d="M 196 167 L 856 167 Q 893 167 893 204 L 893 596 Q 893 633 856 633 L 196 633 Q 160 633 160 596 L 160 204 Q 160 167 196 167 Z"
+              fill="rgba(77,207,224,0.06)"/>
+        <path class="ent offset"
+              d="M 196 167 L 856 167 Q 893 167 893 204 L 893 596 Q 893 633 856 633 L 196 633 Q 160 633 160 596 L 160 204 Q 160 167 196 167 Z"/>
+
+        <!-- Outer -->
+        <path class="ent outer"
+              d="M 220 200 L 840 200 Q 860 200 860 220 L 860 580 Q 860 600 840 600 L 220 600 Q 200 600 200 580 L 200 220 Q 200 200 220 200 Z"/>
+        <path class="outer-anim"
+              d="M 220 200 L 840 200 Q 860 200 860 220 L 860 580 Q 860 600 840 600 L 220 600 Q 200 600 200 580 L 200 220 Q 200 200 220 200 Z"/>
+
+        <!-- Chamfer -->
+        <path class="ent chamfer" d="M 845 200 L 860 215"/>
+        <g class="ent chamfer-glyph">
+          <line x1="855" y1="195" x2="865" y2="195" />
+          <text x="870" y="208" font-family="IBM Plex Mono" font-size="10" fill="var(--chamfer)" stroke="none">C2</text>
+        </g>
+
+        <!-- Holes -->
+        <circle class="ent hole" cx="290" cy="290" r="14"/>
+        <circle class="ent hole" cx="770" cy="290" r="14"/>
+        <circle class="ent hole" cx="290" cy="510" r="14"/>
+        <circle class="ent hole" cx="770" cy="510" r="14"/>
+        <circle class="ent hole" cx="530" cy="400" r="40"/>
+        <g stroke="var(--cy)" stroke-width="0.6" opacity="0.4">
+          <line x1="285" y1="290" x2="295" y2="290"/><line x1="290" y1="285" x2="290" y2="295"/>
+          <line x1="765" y1="290" x2="775" y2="290"/><line x1="770" y1="285" x2="770" y2="295"/>
+          <line x1="285" y1="510" x2="295" y2="510"/><line x1="290" y1="505" x2="290" y2="515"/>
+          <line x1="765" y1="510" x2="775" y2="510"/><line x1="770" y1="505" x2="770" y2="515"/>
+          <line x1="520" y1="400" x2="540" y2="400"/><line x1="530" y1="390" x2="530" y2="410"/>
+        </g>
+        <text class="lbl" x="304" y="280" fill="rgba(77,207,224,0.5)">φ9</text>
+        <text class="lbl" x="784" y="280" fill="rgba(77,207,224,0.5)">φ9</text>
+        <text class="lbl" x="304" y="500" fill="rgba(77,207,224,0.5)">φ9</text>
+        <text class="lbl" x="784" y="500" fill="rgba(77,207,224,0.5)">φ9</text>
+        <text class="lbl" x="558" y="378" fill="rgba(77,207,224,0.5)">φ80</text>
+
+        <!-- Taps -->
+        <g><circle class="ent tap" cx="430" cy="250" r="6"/><text class="lbl-am" x="440" y="246">M8</text></g>
+        <g><circle class="ent tap" cx="630" cy="250" r="6"/><text class="lbl-am" x="640" y="246">M8</text></g>
+        <g><circle class="ent tap" cx="430" cy="550" r="6"/><text class="lbl-am" x="440" y="546">M8</text></g>
+        <g><circle class="ent tap" cx="630" cy="550" r="6"/><text class="lbl-am" x="640" y="546">M8</text></g>
+
+        <!-- Dimensions -->
+        <g>
+          <line class="ent dim" x1="200" y1="660" x2="860" y2="660" marker-end="url(#arr-am)" marker-start="url(#arr-am)"/>
+          <line class="ent dim" x1="200" y1="650" x2="200" y2="670"/>
+          <line class="ent dim" x1="860" y1="650" x2="860" y2="670"/>
+          <text class="lbl-am" x="530" y="678" text-anchor="middle">440</text>
+        </g>
+        <g>
+          <line class="ent dim" x1="130" y1="200" x2="130" y2="600" marker-end="url(#arr-am)" marker-start="url(#arr-am)"/>
+          <line class="ent dim" x1="120" y1="200" x2="140" y2="200"/>
+          <line class="ent dim" x1="120" y1="600" x2="140" y2="600"/>
+          <text class="lbl-am" x="118" y="404" text-anchor="end">280</text>
+        </g>
+        <g>
+          <line class="ent dim" x1="530" y1="400" x2="690" y2="180"/>
+          <line class="ent dim" x1="690" y1="180" x2="730" y2="180"/>
+          <text class="lbl-am" x="734" y="178">φ80</text>
+        </g>
+        <g>
+          <line class="ent dim" x1="290" y1="120" x2="770" y2="120" marker-end="url(#arr-am)" marker-start="url(#arr-am)"/>
+          <line class="ent dim" x1="290" y1="110" x2="290" y2="130"/>
+          <line class="ent dim" x1="770" y1="110" x2="770" y2="130"/>
+          <text class="lbl-am" x="530" y="138" text-anchor="middle">480</text>
+        </g>
+
+        <!-- Balloons -->
+        <g>
+          <line class="ent dim" x1="290" y1="290" x2="170" y2="100"/>
+          <circle class="balloon-circle" cx="160" cy="92" r="14"/>
+          <text class="lbl-am" x="160" y="96" text-anchor="middle" font-size="10" font-weight="600">1</text>
+        </g>
+        <g>
+          <line class="ent dim" x1="530" y1="400" x2="950" y2="320"/>
+          <circle class="balloon-circle" cx="966" cy="316" r="14"/>
+          <text class="lbl-am" x="966" y="320" text-anchor="middle" font-size="10" font-weight="600">2</text>
+        </g>
+
+        <!-- Title frame -->
+        <g>
+          <rect class="ent frame" x="80" y="70" width="1040" height="660" rx="2"/>
+          <rect class="ent frame" x="900" y="700" width="220" height="30"/>
+          <line class="ent frame" x1="900" y1="715" x2="1120" y2="715"/>
+          <line class="ent frame" x1="1010" y1="700" x2="1010" y2="730"/>
+          <text class="lbl-am" x="908" y="711" font-size="9">25057-P1-03 センタープレート</text>
+          <text class="lbl-am" x="908" y="726" font-size="9">SS400 t9</text>
+          <text class="lbl-am" x="1018" y="711" font-size="9">SCALE 1:1</text>
+          <text class="lbl-am" x="1018" y="726" font-size="9">REV. 03</text>
+        </g>
+
+        <!-- Cut sequence nodes -->
+        <g class="cut-node">
+          <circle cx="220" cy="200" r="9"/><text x="220" y="203" text-anchor="middle">1</text>
+        </g>
+        <g class="cut-node">
+          <circle cx="290" cy="290" r="8"/><text x="290" y="293" text-anchor="middle">2</text>
+        </g>
+        <g class="cut-node">
+          <circle cx="770" cy="290" r="8"/><text x="770" y="293" text-anchor="middle">3</text>
+        </g>
+        <g class="cut-node">
+          <circle cx="530" cy="400" r="8"/><text x="530" y="403" text-anchor="middle">4</text>
+        </g>
+        <g class="cut-node">
+          <circle cx="290" cy="510" r="8"/><text x="290" y="513" text-anchor="middle">5</text>
+        </g>
+        <g class="cut-node">
+          <circle cx="770" cy="510" r="8"/><text x="770" y="513" text-anchor="middle">6</text>
+        </g>
+      </svg>
+
+      <!-- bottom-left: meta -->
+      <div class="c-meta">
+        <span>x <b id="cx">412.0</b></span>
+        <span>y <b id="cy">218.5</b></span>
+        <span class="sep">·</span>
+        <span class="cy">1 : 1</span>
+        <span>mm</span>
+      </div>
+
+      <!-- bottom-right: live summary -->
+      <div class="c-summary">
+        <div class="item">
+          <span class="lbl">外周</span>
+          <span class="val">1,847<span class="u">mm</span></span>
+        </div>
+        <div class="sep"></div>
+        <div class="item">
+          <span class="lbl">ピアス</span>
+          <span class="val">5</span>
+        </div>
+        <div class="sep"></div>
+        <div class="item time">
+          <span class="lbl">推定加工</span>
+          <span class="val">02:47</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- RIGHT PANEL -->
+    <aside class="editor">
+      <div class="mode-bar" id="modeBar">
+        <button class="mode-btn" data-mode="outer">
+          <svg><use href="#i-shape"/></svg>
+          <span>外形</span>
+        </button>
+        <button class="mode-btn active" data-mode="delete">
+          <svg><use href="#i-delete"/></svg>
+          <span>削除</span>
+        </button>
+        <button class="mode-btn" data-mode="offset">
+          <svg><use href="#i-offset"/></svg>
+          <span>加工代</span>
+        </button>
+        <button class="mode-btn" data-mode="chamfer">
+          <svg><use href="#i-chamfer"/></svg>
+          <span>C面</span>
+        </button>
+      </div>
+
+      <div class="mode-body" id="modeBody"></div>
+    </aside>
+
+  </div>
+
+  <!-- ============== TABS ============== -->
+  <div class="tabs">
+    <div class="tab"><span class="ts"></span><span class="tn">01</span>ベースフレーム</div>
+    <div class="tab"><span class="ts"></span><span class="tn">02</span>本体フレーム</div>
+    <div class="tab active"><span class="ts dirty"></span><span class="tn">03</span>センタープレート</div>
+    <div class="tab"><span class="ts todo"></span><span class="tn">04</span>減速機サポート</div>
+    <div class="tab"><span class="ts"></span><span class="tn">05</span>ピン受け 上</div>
+    <div class="tab"><span class="ts"></span><span class="tn">06</span>ピン受け 下</div>
+    <div class="tab-add"><svg><use href="#i-plus"/></svg>追加</div>
+  </div>
+
+  <!-- ============== STATUS ============== -->
+  <div class="status">
+    <div class="status-left">
+      <span class="status-item"><span class="dot"></span>外径検出 <b>92%</b></span>
+      <span class="status-item"><span class="dot am"></span>削除候補 <b>12</b></span>
+      <span class="status-item">エンティティ <b>162 → 150</b></span>
+    </div>
+    <div class="status-right">
+      <span class="status-item">autosave <b>2m ago</b></span>
+      <span class="status-item">session <b>23:47</b></span>
+    </div>
+  </div>
+</div>
+
+<script>
+const panels = {
+  outer: `
+    <div class="section-block">
+      <div class="section-head-r">
+        <h4>外形検出</h4>
+        <span class="pill ok">自動 92%</span>
+      </div>
+      <p class="lead">トポロジ再構築で <em>外径 (LINE×8 + ARC×4)</em> を検出しました。誤検出があればキャンバスから線をクリックして修正。</p>
+
+      <div class="kv">
+        <div><div class="k">外径構成</div><div class="ksub">CLOSED · 12 segments</div></div>
+        <span class="v">LINE 8 / ARC 4</span>
+      </div>
+      <div class="kv">
+        <div><div class="k">外周長</div><div class="ksub">PERIMETER</div></div>
+        <span class="v">1,398 mm</span>
+      </div>
+      <div class="kv">
+        <div><div class="k">面積</div><div class="ksub">AREA</div></div>
+        <span class="v">123,200 mm²</span>
+      </div>
+
+      <div class="warn-strip">
+        <svg><use href="#i-warning"/></svg>
+        <div><b>閉ループ未確認 (1)</b><br>右上角の C2 開先指定により、ARC を再計算してください。</div>
+      </div>
+
+      <div class="action-row">
+        <button class="action-btn" onclick="document.getElementById('banner').classList.toggle('show')">線を手動指定</button>
+        <button class="action-btn cy"><svg><use href="#i-arrow-right"/></svg>次へ</button>
+      </div>
+    </div>
+  `,
+
+  delete: `
+    <div class="section-block">
+      <div class="section-head-r">
+        <h4>不要要素の削除</h4>
+        <span class="pill am">12 件</span>
+      </div>
+      <p class="lead">DXF由来の <em>製図情報</em> を出力前に取り除きます。種類別にトグル、またはキャンバスで個別選択。</p>
+
+      <div class="entity-list">
+        <div class="ent-row on">
+          <span class="cb"></span>
+          <div><div class="nm">寸法線</div><div class="ns">DIMENSION</div></div>
+          <span class="cnt">5</span>
+        </div>
+        <div class="ent-row on">
+          <span class="cb"></span>
+          <div><div class="nm">バルーン</div><div class="ns">BALLOON</div></div>
+          <span class="cnt">2</span>
+        </div>
+        <div class="ent-row on">
+          <span class="cb"></span>
+          <div><div class="nm">タップ穴マーク</div><div class="ns">TAP-MARK · M8 × 4</div></div>
+          <span class="cnt">4</span>
+        </div>
+        <div class="ent-row">
+          <span class="cb"></span>
+          <div><div class="nm">図枠 / 表題欄</div><div class="ns">PRODUCTION-FRAME</div></div>
+          <span class="cnt">1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="summary">
+      <h6>削除後プレビュー</h6>
+      <div class="summary-row"><span class="k">残るエンティティ</span><span class="v big">150</span></div>
+      <div class="summary-row"><span class="k">外径</span><span class="v">12 / 12 OK</span></div>
+      <div class="summary-row"><span class="k">推定切断長</span><span class="v">1,847.3<span class="u">mm</span></span></div>
+    </div>
+
+    <div class="action-row">
+      <button class="action-btn">プレビュー</button>
+      <button class="action-btn danger"><svg><use href="#i-delete"/></svg>12件を削除</button>
+    </div>
+  `,
+
+  offset: `
+    <div class="section-block">
+      <div class="section-head-r">
+        <h4>加工代の付加</h4>
+        <span class="pill cy">+3.0 mm</span>
+      </div>
+      <p class="lead">外径から外側に <em>加工代</em> を付加します。デフォルト値の後、辺ごとに個別調整できます。</p>
+
+      <div class="kv">
+        <div><div class="k">デフォルト</div><div class="ksub">外周全体に適用</div></div>
+        <div class="num-step">
+          <button>−</button>
+          <input type="text" value="3.0">
+          <span class="unit">mm</span>
+          <button>+</button>
+        </div>
+      </div>
+      <div class="kv">
+        <div><div class="k">角の処理</div><div class="ksub">CORNER-TYPE</div></div>
+        <span class="v">円弧で連結</span>
+      </div>
+    </div>
+
+    <div class="section-block">
+      <h6 class="lbl">辺ごとの個別設定 <span class="right">クリック で 編集</span></h6>
+      <div class="edge-list">
+        <div class="edge-row">
+          <span class="ix">E1</span>
+          <div><div class="nm">上辺</div><div class="ns">LINE · 660 mm</div></div>
+          <span class="val">+3.0</span>
+        </div>
+        <div class="edge-row">
+          <span class="ix">E2</span>
+          <div><div class="nm">右辺</div><div class="ns">LINE · 360 mm</div></div>
+          <span class="val">+3.0</span>
+        </div>
+        <div class="edge-row">
+          <span class="ix">E3</span>
+          <div><div class="nm">下辺</div><div class="ns">LINE · 660 mm</div></div>
+          <span class="val" style="color:var(--am)">+5.0</span>
+        </div>
+        <div class="edge-row">
+          <span class="ix">E4</span>
+          <div><div class="nm">左辺</div><div class="ns">LINE · 360 mm</div></div>
+          <span class="val">+3.0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="summary">
+      <h6>加工代適用後</h6>
+      <div class="summary-row"><span class="k">外周長</span><span class="v big">1,471<span class="u">mm</span></span></div>
+      <div class="summary-row"><span class="k">板取り寸法</span><span class="v">446 × 286 mm</span></div>
+      <div class="summary-row"><span class="k">材料効率</span><span class="v">94.2%</span></div>
+    </div>
+
+    <div class="action-row">
+      <button class="action-btn">プレビュー再計算</button>
+      <button class="action-btn cy"><svg><use href="#i-arrow-right"/></svg>次へ</button>
+    </div>
+  `,
+
+  chamfer: `
+    <div class="section-block">
+      <div class="section-head-r">
+        <h4>C面 / 開先指定</h4>
+        <span class="pill ch">1 ヶ所</span>
+      </div>
+      <p class="lead">外径の <em>角</em> または <em>辺</em> をキャンバスでクリックして指定します。出力時に注記として記載されます。</p>
+
+      <div class="kv">
+        <div><div class="k">C面サイズ</div><div class="ksub">CHAMFER-SIZE</div></div>
+        <div class="num-step">
+          <button>−</button>
+          <input type="text" value="C2">
+          <span class="unit">×45°</span>
+          <button>+</button>
+        </div>
+      </div>
+      <div class="kv">
+        <div><div class="k">開先角度</div><div class="ksub">BEVEL-ANGLE</div></div>
+        <div class="num-step">
+          <button>−</button>
+          <input type="text" value="30">
+          <span class="unit">°</span>
+          <button>+</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-block">
+      <h6 class="lbl">指定済みの角 <span class="right">クリック で 解除</span></h6>
+      <div class="corner-list">
+        <div class="corner-chip on"><span class="dot"></span>右上 · C2</div>
+        <div class="corner-chip"><span class="dot"></span>左上</div>
+        <div class="corner-chip"><span class="dot"></span>右下</div>
+        <div class="corner-chip"><span class="dot"></span>左下</div>
+      </div>
+    </div>
+
+    <div class="summary" style="border-color:rgba(167,139,250,0.25);background:linear-gradient(180deg, rgba(167,139,250,0.04) 0%, rgba(167,139,250,0) 100%);">
+      <h6 style="color:var(--chamfer)">DXF出力時の注記</h6>
+      <div class="summary-row"><span class="k">右上 角部</span><span class="v" style="color:var(--chamfer)">C2 × 45°</span></div>
+      <div class="summary-row"><span class="k">開先 (該当辺)</span><span class="v">なし</span></div>
+    </div>
+
+    <div class="action-row">
+      <button class="action-btn">指定をクリア</button>
+      <button class="action-btn cy"><svg><use href="#i-arrow-right"/></svg>出力へ</button>
+    </div>
+  `
+};
+
+function setMode(mode) {
+  document.body.setAttribute('data-mode', mode);
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  document.getElementById('modeBody').innerHTML = panels[mode];
+}
+
+document.getElementById('modeBar').addEventListener('click', e => {
+  const b = e.target.closest('.mode-btn');
+  if (b) setMode(b.dataset.mode);
+});
+
+document.addEventListener('click', e => {
+  const r = e.target.closest('.ent-row');
+  if (r) r.classList.toggle('on');
+  const c = e.target.closest('.corner-chip');
+  if (c) c.classList.toggle('on');
+});
+
+setMode('delete');
+
+// live cursor wobble
+let _t = 0;
+setInterval(() => {
+  _t += 0.05;
+  const cx = document.getElementById('cx');
+  const cy = document.getElementById('cy');
+  if (cx && cy) {
+    cx.textContent = (412 + Math.sin(_t) * 0.4).toFixed(1);
+    cy.textContent = (218.5 + Math.cos(_t * 1.3) * 0.3).toFixed(1);
+  }
+}, 80);
+</script>
+
+</body>
+</html>

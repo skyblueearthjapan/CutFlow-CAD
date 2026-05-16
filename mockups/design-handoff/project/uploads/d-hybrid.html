@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>CutFlow CAD - UIモック (D案: ハイブリッド)</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --panel: #ffffff;
+    --border: #e5e7eb;
+    --border-strong: #d1d5db;
+    --text: #1f2937;
+    --text-sub: #6b7280;
+    --text-mute: #9ca3af;
+    --hover: #f3f4f6;
+    --accent: #1f2937;
+    --outer: #dc2626;
+    --delete: #2563eb;
+    --warn: #ea580c;
+    --ok: #16a34a;
+    --chamfer: #9333ea;
+    --grid: #eef0f3;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: 52px 1fr 40px 28px;
+    height: 100vh;
+  }
+
+  /* ------- ヘッダ ------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; font-size: 15px; letter-spacing: 0.02em;
+  }
+  .brand .dot {
+    width: 10px; height: 10px; border-radius: 3px;
+    background: linear-gradient(135deg, #1f2937, #4b5563);
+  }
+  .brand .crumb { color: var(--text-mute); font-weight: 400; font-size: 13px; margin-left: 6px; }
+  .header-actions { display: flex; gap: 8px; }
+  .btn {
+    height: 32px; padding: 0 14px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background .15s, border-color .15s;
+  }
+  .btn:hover { background: var(--hover); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { background: #111827; }
+  .btn .ic { font-size: 14px; line-height: 1; }
+  .icon-btn {
+    width: 32px; height: 32px; border: 1px solid var(--border);
+    background: var(--panel); border-radius: 6px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-sub);
+  }
+  .icon-btn:hover { background: var(--hover); color: var(--text); }
+
+  /* ------- メイン: 3カラム ------- */
+  main {
+    display: grid;
+    grid-template-columns: 56px 1fr 300px;
+    overflow: hidden;
+  }
+
+  /* ------- 左サイドバー（畳まれた状態） ------- */
+  .left-rail {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 12px 0; gap: 6px;
+  }
+  .rail-btn {
+    width: 36px; height: 36px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-sub); cursor: pointer; font-size: 16px;
+  }
+  .rail-btn:hover { background: var(--hover); color: var(--text); }
+  .rail-btn.active { background: var(--hover); color: var(--text); }
+
+  /* ------- キャンバス ------- */
+  .canvas-area {
+    position: relative;
+    background:
+      radial-gradient(circle, var(--grid) 1px, transparent 1px) 0 0/24px 24px,
+      var(--bg);
+    overflow: hidden;
+  }
+  .canvas-toolbar {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 4px; padding: 4px;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid var(--border); border-radius: 8px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .canvas-toolbar button {
+    width: 30px; height: 28px; border: none; background: transparent;
+    border-radius: 5px; color: var(--text-sub); cursor: pointer; font-size: 13px;
+  }
+  .canvas-toolbar button:hover { background: var(--hover); color: var(--text); }
+  .canvas-toolbar .sep { width: 1px; background: var(--border); margin: 4px 2px; }
+
+  .canvas-meta {
+    position: absolute; bottom: 14px; left: 14px;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 11px; color: var(--text-sub);
+    display: flex; gap: 14px;
+  }
+  .canvas-meta b { color: var(--text); font-weight: 600; }
+
+  .canvas-warn {
+    position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+    background: #fff7ed; border: 1px solid #fdba74;
+    color: #9a3412; padding: 8px 14px; border-radius: 6px;
+    font-size: 12px; display: none; align-items: center; gap: 8px;
+    box-shadow: 0 2px 6px rgba(234,88,12,0.15);
+  }
+  .canvas-warn.show { display: flex; }
+
+  .canvas-svg { width: 100%; height: 100%; display: block; }
+
+  /* ------- SVGスタイル(モード連動) ------- */
+  .ent { stroke: #374151; fill: none; stroke-width: 1.2; }
+  .ent.outer { stroke: #374151; }
+  .ent.hole  { stroke: #374151; }
+  .ent.tap   { stroke: #6b7280; stroke-dasharray: 3 3; }
+  .ent.dim   { stroke: #9ca3af; stroke-width: 0.8; }
+  .ent.balloon { stroke: #9ca3af; fill: #fff; }
+  text.label { font-family: inherit; font-size: 10px; fill: var(--text-mute); }
+  text.dim-label { font-family: inherit; font-size: 9px; fill: var(--text-mute); }
+  text.balloon-label { font-family: inherit; font-size: 9px; fill: var(--text-sub); text-anchor: middle; }
+
+  /* モード: 外形 -- 外径だけ強調 */
+  body[data-mode="outer"] .ent.outer { stroke: var(--outer); stroke-width: 2.4; }
+  body[data-mode="outer"] .ent:not(.outer) { opacity: 0.18; }
+
+  /* モード: 削除 -- 削除候補だけ強調 */
+  body[data-mode="delete"] .ent.tap,
+  body[data-mode="delete"] .ent.dim,
+  body[data-mode="delete"] .ent.balloon { stroke: var(--delete); stroke-width: 1.4; opacity: 1; }
+  body[data-mode="delete"] text.dim-label,
+  body[data-mode="delete"] text.balloon-label { fill: var(--delete); }
+  body[data-mode="delete"] .ent.outer,
+  body[data-mode="delete"] .ent.hole { opacity: 0.25; }
+
+  /* モード: 加工代 -- 外形 + オフセット枠を見せる */
+  body[data-mode="offset"] .ent.outer { stroke: var(--outer); stroke-width: 2; }
+  body[data-mode="offset"] .offset-preview { display: block; }
+  body[data-mode="offset"] .ent:not(.outer):not(.offset-preview) { opacity: 0.25; }
+  .offset-preview { display: none; stroke: var(--outer); stroke-width: 1.5; stroke-dasharray: 6 4; fill: none; opacity: 0.85; }
+  .offset-label   { display: none; font-size: 10px; fill: var(--outer); }
+  body[data-mode="offset"] .offset-label { display: block; }
+
+  /* モード: C面/開先 */
+  body[data-mode="chamfer"] .ent.outer { stroke: var(--chamfer); stroke-width: 2; }
+  body[data-mode="chamfer"] .chamfer-marker { display: block; }
+  body[data-mode="chamfer"] .ent:not(.outer):not(.chamfer-marker) { opacity: 0.25; }
+  .chamfer-marker { display: none; stroke: var(--chamfer); stroke-width: 2; fill: none; }
+
+  /* ------- 右パネル(編集) ------- */
+  .right-panel {
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .modes {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    border-bottom: 1px solid var(--border);
+  }
+  .mode-btn {
+    height: 64px; border: none; background: transparent; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; color: var(--text-sub); font-size: 11px;
+    border-bottom: 2px solid transparent;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .mode-btn:hover { background: var(--hover); color: var(--text); }
+  .mode-btn .mi { font-size: 18px; line-height: 1; }
+  .mode-btn[data-active="true"] {
+    color: var(--text); border-bottom-color: var(--text);
+    background: var(--bg);
+  }
+
+  .panel-body { padding: 18px 18px 20px; overflow-y: auto; flex: 1; }
+  .panel-title {
+    font-size: 13px; font-weight: 600; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-title .badge {
+    font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    background: var(--hover); color: var(--text-sub); font-weight: 500;
+  }
+  .panel-title .badge.ok { background: #ecfdf5; color: var(--ok); }
+  .panel-title .badge.warn { background: #fff7ed; color: var(--warn); }
+  .panel-desc { font-size: 11px; color: var(--text-sub); margin-bottom: 16px; line-height: 1.5; }
+
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row-label { font-size: 12px; color: var(--text); }
+  .row-sub { font-size: 11px; color: var(--text-sub); margin-top: 2px; }
+  .num-input {
+    display: inline-flex; align-items: center; border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; height: 28px;
+  }
+  .num-input button {
+    width: 26px; height: 100%; border: none; background: var(--panel);
+    color: var(--text-sub); cursor: pointer; font-size: 14px;
+  }
+  .num-input button:hover { background: var(--hover); }
+  .num-input input {
+    width: 48px; height: 100%; border: none; text-align: center;
+    font-size: 12px; font-weight: 600; color: var(--text);
+    border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+    background: transparent;
+  }
+  .num-input input:focus { outline: none; }
+
+  .swatch-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 9px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; cursor: pointer;
+  }
+  .swatch:hover { background: var(--hover); }
+  .swatch input { margin: 0; }
+  .swatch .sw {
+    width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.1);
+  }
+
+  .secondary-btn {
+    width: 100%; margin-top: 10px;
+    height: 32px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); cursor: pointer; font-size: 12px;
+  }
+  .secondary-btn:hover { background: var(--hover); }
+  .secondary-btn.danger { color: var(--delete); border-color: #bfdbfe; }
+  .secondary-btn.danger:hover { background: #eff6ff; }
+
+  /* ------- 下部タブ ------- */
+  .tabbar {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex; align-items: stretch; overflow-x: auto;
+  }
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 16px; height: 100%;
+    border-right: 1px solid var(--border);
+    font-size: 12px; color: var(--text-sub); cursor: pointer;
+    position: relative;
+  }
+  .tab:hover { background: var(--hover); }
+  .tab.active {
+    color: var(--text); font-weight: 500;
+    background: var(--bg);
+  }
+  .tab.active::after {
+    content: ""; position: absolute; left: 0; top: 0;
+    width: 100%; height: 2px; background: var(--text);
+  }
+  .tab .dirty { color: var(--warn); font-weight: 700; }
+  .tab .close {
+    color: var(--text-mute); font-size: 14px; margin-left: 4px;
+    width: 16px; height: 16px; border-radius: 3px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .tab .close:hover { background: var(--border); color: var(--text); }
+  .tab-add {
+    padding: 0 14px; color: var(--text-mute); cursor: pointer;
+    display: flex; align-items: center; font-size: 16px;
+  }
+  .tab-add:hover { color: var(--text); }
+
+  /* ------- ステータスバー ------- */
+  .statusbar {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; font-size: 11px; color: var(--text-sub);
+  }
+  .status-left, .status-right { display: flex; gap: 16px; align-items: center; }
+  .status-item .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    margin-right: 5px;
+  }
+  .status-item .dot.ok   { background: var(--ok); }
+  .status-item .dot.warn { background: var(--warn); }
+</style>
+</head>
+<body data-mode="outer">
+
+<div class="app">
+
+  <!-- ===== ヘッダ ===== -->
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      CutFlow CAD
+      <span class="crumb">/ コベルコブームRB / P1_昇降軸</span>
+    </div>
+    <div class="header-actions">
+      <button class="btn"><span class="ic">📂</span> 開く</button>
+      <button class="btn primary"><span class="ic">↗</span> 出力</button>
+      <button class="icon-btn" title="設定">⚙</button>
+    </div>
+  </header>
+
+  <!-- ===== メイン ===== -->
+  <main>
+
+    <!-- 左サイドバー -->
+    <aside class="left-rail">
+      <div class="rail-btn active" title="ファイル一覧">≡</div>
+      <div class="rail-btn" title="検索">⌕</div>
+      <div class="rail-btn" title="一括処理">⚡</div>
+      <div style="flex:1"></div>
+      <div class="rail-btn" title="ヘルプ">?</div>
+    </aside>
+
+    <!-- キャンバス -->
+    <section class="canvas-area">
+
+      <div class="canvas-toolbar">
+        <button title="パン">✋</button>
+        <button title="選択">▢</button>
+        <div class="sep"></div>
+        <button title="ズームイン">+</button>
+        <button title="ズームアウト">−</button>
+        <button title="全体表示">⤢</button>
+        <div class="sep"></div>
+        <button title="元に戻す">↶</button>
+        <button title="やり直し">↷</button>
+      </div>
+
+      <div class="canvas-warn" id="warnBox">
+        ⚠ 外径を自動検出できませんでした。右パネルの「手動選択」を試してください
+      </div>
+
+      <!-- ダミーDXF: センタープレート風 -->
+      <svg class="canvas-svg" viewBox="0 0 800 520" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#9ca3af" />
+          </marker>
+        </defs>
+
+        <!-- 外径(矩形 + 角丸) -->
+        <path class="ent outer"
+              d="M 200 120 L 600 120 Q 620 120 620 140 L 620 380 Q 620 400 600 400 L 200 400 Q 180 400 180 380 L 180 140 Q 180 120 200 120 Z" />
+
+        <!-- 加工代モード時のオフセット枠 -->
+        <path class="offset-preview"
+              d="M 197 117 L 603 117 Q 623 117 623 137 L 623 383 Q 623 403 603 403 L 197 403 Q 177 403 177 383 L 177 137 Q 177 117 197 117 Z" />
+        <text class="offset-label" x="630" y="135">+3mm</text>
+
+        <!-- C面マーカー(右上角) -->
+        <path class="chamfer-marker" d="M 614 120 L 604 130 M 620 126 L 610 136" />
+
+        <!-- 穴(レーザー加工で残すもの) -->
+        <circle class="ent hole" cx="260" cy="200" r="14" />
+        <circle class="ent hole" cx="540" cy="200" r="14" />
+        <circle class="ent hole" cx="260" cy="320" r="14" />
+        <circle class="ent hole" cx="540" cy="320" r="14" />
+        <circle class="ent hole" cx="400" cy="260" r="32" />
+
+        <!-- タップ(削除対象) -->
+        <circle class="ent tap" cx="340" cy="170" r="6" />
+        <text class="label" x="350" y="168">M8</text>
+        <circle class="ent tap" cx="460" cy="170" r="6" />
+        <text class="label" x="470" y="168">M8</text>
+        <circle class="ent tap" cx="340" cy="360" r="6" />
+        <text class="label" x="350" y="358">M8</text>
+        <circle class="ent tap" cx="460" cy="360" r="6" />
+        <text class="label" x="470" y="358">M8</text>
+
+        <!-- 寸法線(削除対象) -->
+        <!-- 横方向 -->
+        <line class="ent dim" x1="180" y1="440" x2="620" y2="440" marker-end="url(#arr)" marker-start="url(#arr)" />
+        <line class="ent dim" x1="180" y1="430" x2="180" y2="450" />
+        <line class="ent dim" x1="620" y1="430" x2="620" y2="450" />
+        <text class="dim-label" x="400" y="455" text-anchor="middle">440</text>
+        <!-- 縦方向 -->
+        <line class="ent dim" x1="120" y1="120" x2="120" y2="400" marker-end="url(#arr)" marker-start="url(#arr)" />
+        <line class="ent dim" x1="110" y1="120" x2="130" y2="120" />
+        <line class="ent dim" x1="110" y1="400" x2="130" y2="400" />
+        <text class="dim-label" x="105" y="263" text-anchor="end">280</text>
+        <!-- 穴径寸法 -->
+        <line class="ent dim" x1="400" y1="260" x2="500" y2="160" marker-start="url(#arr)" />
+        <text class="dim-label" x="505" y="158">φ64</text>
+
+        <!-- バルーン(削除対象) -->
+        <g>
+          <line class="ent dim" x1="260" y1="200" x2="170" y2="100" />
+          <circle class="ent balloon" cx="160" cy="95" r="11" />
+          <text class="balloon-label" x="160" y="98">1</text>
+        </g>
+        <g>
+          <line class="ent dim" x1="400" y1="260" x2="440" y2="80" />
+          <circle class="ent balloon" cx="450" cy="75" r="11" />
+          <text class="balloon-label" x="450" y="78">2</text>
+        </g>
+
+        <!-- 図面枠とタイトル(製作図枠 → 出力時削除) -->
+        <rect class="ent dim" x="60" y="60" width="700" height="440" />
+        <line class="ent dim" x1="500" y1="470" x2="760" y2="470" />
+        <line class="ent dim" x1="500" y1="490" x2="760" y2="490" />
+        <text class="dim-label" x="510" y="484">25057-P1-03 センタープレート</text>
+      </svg>
+
+      <div class="canvas-meta">
+        <span><b>1:1</b> 縮尺</span>
+        <span>x: 412.0  y: 218.5</span>
+        <span>SS400 t9</span>
+      </div>
+    </section>
+
+    <!-- 右パネル -->
+    <aside class="right-panel">
+
+      <div class="modes" id="modeTabs">
+        <button class="mode-btn" data-mode="outer" data-active="true">
+          <span class="mi">◇</span>外形
+        </button>
+        <button class="mode-btn" data-mode="delete">
+          <span class="mi">✕</span>削除
+        </button>
+        <button class="mode-btn" data-mode="offset">
+          <span class="mi">⬚</span>加工代
+        </button>
+        <button class="mode-btn" data-mode="chamfer">
+          <span class="mi">⌐</span>C面
+        </button>
+      </div>
+
+      <div class="panel-body" id="panelBody">
+        <!-- JSで切替 -->
+      </div>
+    </aside>
+  </main>
+
+  <!-- ===== 下部タブ ===== -->
+  <div class="tabbar">
+    <div class="tab"><span>01 ベースフレーム</span><span class="close">✕</span></div>
+    <div class="tab"><span>02 本体フレーム</span><span class="close">✕</span></div>
+    <div class="tab active"><span>03 センタープレート</span><span class="dirty">●</span><span class="close">✕</span></div>
+    <div class="tab"><span>04 減速機サポート</span><span class="close">✕</span></div>
+    <div class="tab-add" title="DXFを追加">＋</div>
+  </div>
+
+  <!-- ===== ステータスバー ===== -->
+  <div class="statusbar">
+    <div class="status-left">
+      <span class="status-item"><span class="dot ok"></span>外径検出: 92%</span>
+      <span class="status-item"><span class="dot warn"></span>削除候補: 12件</span>
+      <span class="status-item">エンティティ: 162</span>
+    </div>
+    <div class="status-right">
+      <span>保存 2分前</span>
+      <span>セッション残: 23h 47m</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // モード別パネル内容
+  const panels = {
+    outer: `
+      <div class="panel-title">外形編集 <span class="badge ok">自動検出 92%</span></div>
+      <div class="panel-desc">外径が赤色で表示されています。手動で修正したい場合は下のボタンから操作してください。</div>
+      <div class="row">
+        <div>
+          <div class="row-label">検出方式</div>
+          <div class="row-sub">トポロジ再構築（自動）</div>
+        </div>
+        <button class="btn" style="height:28px;padding:0 10px;">再検出</button>
+      </div>
+      <div class="row">
+        <div>
+          <div class="row-label">外径構成</div>
+          <div class="row-sub">LINE × 8, ARC × 4</div>
+        </div>
+      </div>
+      <button class="secondary-btn">線をクリックして手動修正</button>
+      <button class="secondary-btn" onclick="document.getElementById('warnBox').classList.toggle('show')">⚠ 検出失敗UIを試す</button>
+    `,
+    delete: `
+      <div class="panel-title">削除対象 <span class="badge warn">12件</span></div>
+      <div class="panel-desc">青色の要素が削除候補です。種類別/色別で一括削除、またはキャンバスでクリックして個別削除できます。</div>
+      <div class="row">
+        <div class="row-label">種類別</div>
+      </div>
+      <div class="swatch-row">
+        <label class="swatch"><input type="checkbox" checked><span>寸法線 (5)</span></label>
+        <label class="swatch"><input type="checkbox" checked><span>バルーン (2)</span></label>
+        <label class="swatch"><input type="checkbox" checked><span>タップ (4)</span></label>
+        <label class="swatch"><input type="checkbox"><span>製作図枠 (1)</span></label>
+      </div>
+      <div class="row" style="margin-top:14px;">
+        <div class="row-label">色別</div>
+      </div>
+      <div class="swatch-row">
+        <label class="swatch"><input type="checkbox"><span class="sw" style="background:#dc2626"></span>赤 (0)</label>
+        <label class="swatch"><input type="checkbox"><span class="sw" style="background:#16a34a"></span>緑 (3)</label>
+        <label class="swatch"><input type="checkbox"><span class="sw" style="background:#2563eb"></span>青 (0)</label>
+        <label class="swatch"><input type="checkbox"><span class="sw" style="background:#9ca3af"></span>灰 (8)</label>
+      </div>
+      <button class="secondary-btn danger" style="margin-top:14px;">選択を削除</button>
+    `,
+    offset: `
+      <div class="panel-title">加工代の付加</div>
+      <div class="panel-desc">外径から外側に加工代を確保します。デフォルト値を設定後、特定の辺だけクリックして個別調整できます。</div>
+      <div class="row">
+        <div>
+          <div class="row-label">デフォルト</div>
+          <div class="row-sub">外径全周に一律で適用</div>
+        </div>
+        <div class="num-input">
+          <button>−</button><input type="text" value="3"><button>＋</button>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="row-label">単位</div>
+        </div>
+        <div style="font-size:12px;color:var(--text-sub);">mm</div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="row-label">個別調整中の辺</div>
+          <div class="row-sub">なし（辺をクリックで選択）</div>
+        </div>
+      </div>
+      <button class="secondary-btn">プレビュー再計算</button>
+    `,
+    chamfer: `
+      <div class="panel-title">C面 / 開先</div>
+      <div class="panel-desc">外径の角や辺をクリックで指定し、C面サイズや開先角度を設定します。出力時に注記として記載されます。</div>
+      <div class="row">
+        <div>
+          <div class="row-label">C面サイズ</div>
+        </div>
+        <div class="num-input">
+          <button>−</button><input type="text" value="C2"><button>＋</button>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="row-label">開先角度</div>
+        </div>
+        <div class="num-input">
+          <button>−</button><input type="text" value="30°"><button>＋</button>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="row-label">指定済み</div>
+          <div class="row-sub">右上角に C2（1箇所）</div>
+        </div>
+      </div>
+      <button class="secondary-btn">クリア</button>
+    `
+  };
+
+  function setMode(m) {
+    document.body.setAttribute('data-mode', m);
+    document.querySelectorAll('.mode-btn').forEach(b => {
+      b.setAttribute('data-active', b.dataset.mode === m ? 'true' : 'false');
+    });
+    document.getElementById('panelBody').innerHTML = panels[m];
+  }
+
+  document.getElementById('modeTabs').addEventListener('click', e => {
+    const btn = e.target.closest('.mode-btn');
+    if (btn) setMode(btn.dataset.mode);
+  });
+
+  setMode('outer');
+</script>
+
+</body>
+</html>
