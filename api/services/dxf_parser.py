@@ -124,6 +124,11 @@ def _do_parse(
     entities: list[EntityOut] = []
     raw_for_classifier: list[tuple[str, DXFEntity, dict[str, Any]]] = []
 
+    # Counters for virtual-entity expansion (DIMENSION/INSERT bodies). The
+    # synthetic child IDs use a separate prefix so they never collide with
+    # the primary `e{idx:05d}` enumeration.
+    virt_counter = 0
+
     for idx, e in enumerate(msp):
         eid = f"e{idx:05d}"
         geom = _geom_for(e, doc)
@@ -138,10 +143,53 @@ def _do_parse(
         entities.append(ent)
         raw_for_classifier.append((eid, e, geom))
 
+        # Expand DIMENSION / INSERT virtual entities so the frontend sees
+        # the actual geometry (arrows, extension lines, dimension text, and
+        # the contents of title-block / tap blocks). The original parent
+        # entity is kept (with its category) so delete-mode toggles still
+        # operate on it; children inherit the parent category so they fade
+        # together when the parent is removed.
+        et = e.dxftype()
+        if et in ("DIMENSION", "INSERT", "LEADER"):
+            try:
+                # `virtual_entities()` yields concrete LINE/ARC/CIRCLE/TEXT/etc
+                # representing the rendered appearance of the parent.
+                for ve in e.virtual_entities():
+                    vt = ve.dxftype()
+                    if vt in ("DIMENSION", "INSERT"):
+                        # Avoid deeper recursion explosion for nested blocks
+                        # (Phase 5 keeps it 1-level deep).
+                        continue
+                    vgeom = _geom_for(ve, doc)
+                    if not vgeom:
+                        continue
+                    veid = f"v{virt_counter:05d}_{eid}"
+                    virt_counter += 1
+                    entities.append(EntityOut(
+                        id=veid,
+                        type=vt,
+                        category="other",  # patched below from parent
+                        color=int(getattr(ve.dxf, "color", 256) or 256),
+                        layer=str(getattr(ve.dxf, "layer", "0")),
+                        geom=vgeom,
+                    ))
+                    # Don't feed virtual children into the classifier — they
+                    # inherit the parent's final category in the second pass.
+            except Exception:
+                # Block resolution can fail on broken DXFs; skip silently.
+                pass
+
     # Run the (heuristic) classifier and patch categories in place.
     categories, candidates = classify_entities(raw_for_classifier, doc, outer_ids=outer_ids)
     for ent in entities:
-        ent.category = categories.get(ent.id, "other")
+        # Virtual children (id "v<n>_<parent>") inherit parent category so
+        # the visual stays coherent and delete-mode toggles affect the
+        # whole rendered dimension/insert.
+        if ent.id.startswith("v") and "_" in ent.id:
+            parent_id = ent.id.split("_", 1)[1]
+            ent.category = categories.get(parent_id, "other")
+        else:
+            ent.category = categories.get(ent.id, "other")
 
     bbox_obj = _safe_bbox(msp)
     stats = _build_stats(entities)
