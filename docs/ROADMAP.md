@@ -111,16 +111,25 @@
 
 **目的**: 真に「材料取り最適化ツール」へ進化させる
 
-- [ ] **ネスティング機能**:
-  - 複数部品の自動配置（板取り最適化）
-  - 歩留まり計算
-  - ジョブキュー (重い処理を非同期化)
-- [ ] **履歴管理**: セッション保存・呼び出し
-- [ ] **テンプレート**: よく使う材質・板厚・加工代のプリセット
-- [ ] **エクスポート拡張**: STEP / G-code 等への対応検討
-- [ ] **監視・運用**: ログ集約、Discord通知連携（既存 lineworks-x-ops 経由）
+- [x] **ネスティング機能**:
+  - [x] 複数部品の自動配置（BLF — Bottom-Left-Fill）
+  - [x] 歩留まり計算 (シート別 + 全体)
+  - [x] ジョブキュー (asyncio + ワーカープール)
+  - [x] シート別 DXF エクスポート (簡易: bbox + ラベル)
+- [x] **履歴管理**: セッション保存・呼び出し (tar.gz アーカイブ, zip-bomb 防御込み)
+- [x] **テンプレート**: 材質・板厚・加工代プリセット (alias serializer で FE/BE 整合)
+- [x] **監視・運用**:
+  - [x] メトリクス収集 + `/api/metrics` (localhost / API キー認証ガード)
+  - [x] Discord 通知連携 (file append → lineworks-x-ops Bot)
+  - [x] ジョブ TTL purge (7日, 個人情報残留対策)
+- [ ] **エクスポート拡張**: STEP / G-code は Phase 6 以降
 
-**完了条件**: 材料取り工程全体が CutFlow•CAD で完結する
+**完了条件**: 材料取り工程全体が CutFlow•CAD で完結する (達成済)
+
+Phase 5 修正サマリ:
+- CRITICAL/HIGH/MEDIUM の FE/BE 契約整合修正 (NestRequest / JobStatus enum / Sheet/Placement フィールド名 / ApplyTemplateResponse / Template alias)
+- セキュリティ強化 (zip-bomb / metrics 認可 / error message scrub / parts×sheets DoS ガード)
+- contract alignment / job cleanup / nest export / template failure / metrics auth の新規テスト追加
 
 ---
 

@@ -15,6 +15,7 @@
 
 import type {
   AddedHole,
+  ApplyTemplateResponse,
   Bridge,
   ChamferGeometry,
   ChamferSpec,
@@ -26,14 +27,19 @@ import type {
   EditedVertex,
   FileData,
   HolePatternRequest,
+  Job,
+  NestRequest,
+  NestResult,
   Note,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
   PdfExportOptions,
+  SavedSession,
   Session,
   SnapKind,
   SnapResult,
+  Template,
 } from '../types/dxf';
 import {
   mockUploadFiles,
@@ -62,6 +68,16 @@ import {
   mockAddBridge,
   mockAddBridgeAuto,
   mockRemoveBridge,
+  // Phase 5
+  mockNest,
+  mockGetJobStatus,
+  mockGetNestResult,
+  mockExportNestSheet,
+  mockSaveSession,
+  mockListSavedSessions,
+  mockLoadSession,
+  mockGetTemplates,
+  mockApplyTemplate,
 } from './mockSession';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -764,6 +780,117 @@ export async function removeBridge(
     const body = await res.text().catch(() => '');
     throw new ApiError(res.status, body, buildErrorMessage(res.status, body, res.statusText));
   }
+}
+
+/* -------------------- Phase 5: nesting / history / templates -------------- */
+
+/** POST /api/session/{sid}/nest — enqueue a nesting job; returns the job_id
+ *  the caller must poll via getJobStatus + getNestResult. */
+export async function nest(sid: string, req: NestRequest): Promise<{ job_id: string }> {
+  if (!(await probeBackend())) return mockNest(sid, req);
+  const res = await fetch(url(`/api/session/${sid}/nest`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow<{ job_id: string }>(res);
+}
+
+/** GET /api/jobs/{job_id} — poll the queue for status + progress. */
+export async function getJobStatus(job_id: string): Promise<Job> {
+  if (!(await probeBackend())) return mockGetJobStatus(job_id);
+  const res = await fetch(url(`/api/jobs/${job_id}`));
+  return jsonOrThrow<Job>(res);
+}
+
+/** GET /api/jobs/{job_id}/result — full nesting result envelope (sheets / util).
+ *  C3: Default result fetch endpoint. ``/result/sheets`` is reserved as a JSON
+ *  download with ``Content-Disposition`` for explicit file save. */
+export async function getNestResult(job_id: string): Promise<NestResult> {
+  if (!(await probeBackend())) return mockGetNestResult(job_id);
+  const res = await fetch(url(`/api/jobs/${job_id}/result`));
+  return jsonOrThrow<NestResult>(res);
+}
+
+/** GET /api/jobs/{job_id}/result/sheets/{sheet_index}/export — fetch a single
+ *  sheet as a DXF blob. Used by the "DXFとして書き出し" button per sheet. */
+export async function exportNestSheet(job_id: string, sheet_index: number): Promise<Blob> {
+  if (!(await probeBackend())) return mockExportNestSheet(job_id, sheet_index);
+  const res = await fetch(
+    url(`/api/jobs/${job_id}/result/sheets/${sheet_index}/export?format=dxf`),
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, body, buildErrorMessage(res.status, body, res.statusText));
+  }
+  return res.blob();
+}
+
+/** POST /api/sessions/save — persist the current session under a name. */
+export async function saveSession(name: string, sid: string): Promise<SavedSession> {
+  if (!(await probeBackend())) return mockSaveSession(name, sid);
+  const res = await fetch(url(`/api/sessions/save`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, session_id: sid }),
+  });
+  return jsonOrThrow<SavedSession>(res);
+}
+
+/** GET /api/sessions/saved — list saved sessions (newest first).
+ *  H2: Backend wraps the list in ``{saved: [...]}`` (not ``sessions``). */
+export async function listSavedSessions(): Promise<SavedSession[]> {
+  if (!(await probeBackend())) return mockListSavedSessions();
+  const res = await fetch(url(`/api/sessions/saved`));
+  const data = await jsonOrThrow<{ saved: SavedSession[] }>(res);
+  return data.saved ?? [];
+}
+
+/** POST /api/sessions/load/{name} — return a Session that the UI can swap in
+ *  as the new current session. */
+export async function loadSession(name: string): Promise<Session> {
+  if (!(await probeBackend())) return mockLoadSession(name);
+  const res = await fetch(url(`/api/sessions/load/${encodeURIComponent(name)}`), {
+    method: 'POST',
+  });
+  return jsonOrThrow<Session>(res);
+}
+
+/** GET /api/templates — list the material/spacing presets. */
+export async function getTemplates(): Promise<Template[]> {
+  if (!(await probeBackend())) return mockGetTemplates();
+  const res = await fetch(url(`/api/templates`));
+  const data = await jsonOrThrow<{ templates: Template[] }>(res);
+  return data.templates ?? [];
+}
+
+/** POST /api/sessions/{sid}/apply-template/{template_id} — apply the preset to
+ *  the current session (sets default offset / material / sheet size).
+ *  C5: Backend returns ``ApplyTemplateResponse`` with the full ``template`` nested. */
+export async function applyTemplate(
+  sid: string,
+  template_id: string,
+): Promise<ApplyTemplateResponse> {
+  if (!(await probeBackend())) {
+    const tpl = await mockApplyTemplate(sid, template_id);
+    return {
+      template_id,
+      session_id: sid,
+      applied_to: [],
+      skipped: [],
+      default_offset_mm: tpl.spacing_mm ?? 0,
+      template: tpl,
+    };
+  }
+  const res = await fetch(
+    url(`/api/sessions/${sid}/apply-template/${encodeURIComponent(template_id)}`),
+    { method: 'POST' },
+  );
+  // H7: 207 Multi-Status (全件失敗) も成功扱いで body を返す
+  if (res.status === 207) {
+    return res.json() as Promise<ApplyTemplateResponse>;
+  }
+  return jsonOrThrow<ApplyTemplateResponse>(res);
 }
 
 /* Re-exports — keep the symbol available even when the mock is missing

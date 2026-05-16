@@ -354,6 +354,39 @@ class SessionStore:
         self.write_phase4(sid, fid, key, data)
         return True
 
+    # -- Phase 5 — per-file template binding (material / thickness / offset)
+
+    def template_path(self, sid: str, fid: str) -> Path:
+        return self._state_dir(sid, fid) / "template.json"
+
+    def read_template_for_file(self, sid: str, fid: str) -> dict | None:
+        path = self.template_path(sid, fid)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("template.json unreadable for %s/%s: %s", sid, fid, exc)
+            return None
+
+    def write_template_for_file(self, sid: str, fid: str, template: dict) -> None:
+        self.get(sid)  # validate session
+        target = self.template_path(sid, fid)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".template.", suffix=".json", dir=str(target.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(template, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def invalidate_offset(self, sid: str, fid: str) -> bool:
         """Drop any cached offset result for ``fid`` (H11).
 

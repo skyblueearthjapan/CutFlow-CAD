@@ -31,14 +31,21 @@ import type {
   Entity,
   FileData,
   HolePatternRequest,
+  Job,
+  NestPlacement,
+  NestRequest,
+  NestResult,
   Note,
   OffsetRequest,
   OffsetResult,
   OuterDetectionResult,
   PdfExportOptions,
+  SavedSession,
   Session,
   SessionFile,
+  Sheet,
   SnapResult,
+  Template,
 } from '../types/dxf';
 
 interface MockBundle {
@@ -957,4 +964,349 @@ export async function mockExportPdf(
     '0000000110 00000 n \n' +
     'trailer << /Size 4 /Root 1 0 R >>\nstartxref\n179\n%%EOF\n';
   return new Blob([body], { type: 'application/pdf' });
+}
+
+/* -------------------- Phase 5: nesting / history / templates -------------- */
+
+/** In-memory job + saved-session storage for the Phase 5 mock. */
+interface MockJob {
+  job: Job;
+  /** sid used to compute the result on demand. */
+  sid: string;
+  req: NestRequest;
+  /** Final result cached after the job transitions to 'success'. */
+  result?: NestResult;
+  /** Wall-clock time the job entered 'running' so progress ramps up. */
+  startedAt: number;
+}
+
+const _jobs = new Map<string, MockJob>();
+const _savedSessions = new Map<string, { meta: SavedSession; session: Session; files: Map<string, FileData> }>();
+
+/** Built-in template presets surfaced by the mock.
+ *  C1/H1: Template fields are BE-aligned (``template_id`` / ``spacing_mm``
+ *  alias keys, plus required ``material`` / ``thickness_mm``). */
+const _templates: Template[] = [
+  {
+    template_id: 'ss400-t9',
+    name: 'SS400 t9 標準',
+    description: '一般構造用鋼 / 切板 t9 — 加工代 3.0 mm / シート 1500 × 3000',
+    material: 'SS400',
+    thickness_mm: 9,
+    spacing_mm: 3.0,
+    sheet_width: 1500,
+    sheet_height: 3000,
+  },
+  {
+    template_id: 'sphc-t1_6',
+    name: 'SPHC t1.6 薄板',
+    description: '熱間圧延薄板 / 加工代 1.5 mm / シート 1219 × 2438',
+    material: 'SPHC',
+    thickness_mm: 1.6,
+    spacing_mm: 1.5,
+    sheet_width: 1219,
+    sheet_height: 2438,
+  },
+  {
+    template_id: 'sus304-t3',
+    name: 'SUS304 t3',
+    description: 'ステンレス / 加工代 2.5 mm / シート 1219 × 2438',
+    material: 'SUS304',
+    thickness_mm: 3,
+    spacing_mm: 2.5,
+    sheet_width: 1219,
+    sheet_height: 2438,
+  },
+];
+
+/** Build a plausible Bottom-Left-Fill placement. Each part bbox uses the
+ *  source file's bounding-box; the mock packs them row-by-row from the
+ *  bottom-left corner. Yields ~65-80% utilisation for the demo geometry.
+ *
+ *  Phase 5 C4: 出力は BE-aligned (Sheet.sheet_index / width_mm / height_mm /
+ *  efficiency, placement.x_mm / y_mm / width_mm / height_mm / rotation_deg)。 */
+function packBLF(
+  parts: Array<{ file_id: string; w: number; h: number }>,
+  sheet_w: number,
+  sheet_h: number,
+  spacing: number,
+  allow_rotate: boolean,
+): { sheets: Sheet[]; unplaced: number } {
+  const sheets: Array<Sheet & { _cursor?: { x: number; y: number; rowH: number } }> = [];
+  let unplaced = 0;
+
+  function tryPlace(
+    sheet: Sheet & { _cursor: { x: number; y: number; rowH: number } },
+    p: { file_id: string; w: number; h: number },
+  ): boolean {
+    let pw = p.w + spacing * 2;
+    let ph = p.h + spacing * 2;
+    let rotated = false;
+    if (pw > sheet.width_mm - sheet._cursor.x && allow_rotate) {
+      const r_pw = p.h + spacing * 2;
+      const r_ph = p.w + spacing * 2;
+      if (r_pw <= sheet.width_mm - sheet._cursor.x) {
+        pw = r_pw; ph = r_ph; rotated = true;
+      }
+    }
+    if (sheet._cursor.x + pw > sheet.width_mm) {
+      sheet._cursor.x = 0;
+      sheet._cursor.y += sheet._cursor.rowH;
+      sheet._cursor.rowH = 0;
+      pw = p.w + spacing * 2;
+      ph = p.h + spacing * 2;
+      rotated = false;
+      if (allow_rotate && p.h < p.w && pw > sheet.width_mm) {
+        pw = p.h + spacing * 2; ph = p.w + spacing * 2; rotated = true;
+      }
+    }
+    if (pw > sheet.width_mm || sheet._cursor.y + ph > sheet.height_mm) return false;
+    const dw = rotated ? p.h : p.w;
+    const dh = rotated ? p.w : p.h;
+    sheet.placements.push({
+      file_id: p.file_id,
+      sheet_index: sheet.sheet_index,
+      x_mm: sheet._cursor.x + spacing,
+      y_mm: sheet._cursor.y + spacing,
+      width_mm: dw,
+      height_mm: dh,
+      rotation_deg: rotated ? 90 : 0,
+    });
+    sheet._cursor.x += pw;
+    if (ph > sheet._cursor.rowH) sheet._cursor.rowH = ph;
+    return true;
+  }
+
+  function newSheet(): Sheet & { _cursor: { x: number; y: number; rowH: number } } {
+    const sh = {
+      sheet_index: sheets.length,
+      width_mm: sheet_w,
+      height_mm: sheet_h,
+      placements: [] as NestPlacement[],
+      efficiency: 0,
+      used_area_mm2: 0,
+      sheet_area_mm2: sheet_w * sheet_h,
+      _cursor: { x: 0, y: 0, rowH: 0 },
+    };
+    sheets.push(sh);
+    return sh;
+  }
+
+  let active: (Sheet & { _cursor: { x: number; y: number; rowH: number } }) | null = null;
+  for (const p of parts) {
+    if (
+      Math.min(p.w, p.h) + spacing * 2 > Math.min(sheet_w, sheet_h) ||
+      Math.max(p.w, p.h) + spacing * 2 > Math.max(sheet_w, sheet_h)
+    ) {
+      unplaced += 1;
+      continue;
+    }
+    if (!active) active = newSheet();
+    if (!tryPlace(active, p)) {
+      active = newSheet();
+      tryPlace(active, p);
+    }
+  }
+
+  for (const sh of sheets) {
+    const used = sh.placements.reduce((acc, pl) => acc + pl.width_mm * pl.height_mm, 0);
+    sh.used_area_mm2 = used;
+    sh.efficiency = sh.sheet_area_mm2 > 0 ? used / sh.sheet_area_mm2 : 0;
+    delete sh._cursor;
+  }
+  return { sheets, unplaced };
+}
+
+/** Build a NestResult by packing the chosen files from the session bundle. */
+function buildNestResult(_job_id: string, sid: string, req: NestRequest): NestResult {
+  const bundle = locateBundle(sid);
+  const fileIds = req.file_ids.length > 0
+    ? req.file_ids
+    : [...bundle.files.keys()];
+
+  const parts: Array<{ file_id: string; w: number; h: number }> = [];
+  for (const fid of fileIds) {
+    const f = bundle.files.get(fid);
+    if (!f) continue;
+    const bb = f.bounding_box;
+    parts.push({
+      file_id: fid,
+      w: Math.max(1, bb.max_x - bb.min_x),
+      h: Math.max(1, bb.max_y - bb.min_y),
+    });
+  }
+
+  const { sheets, unplaced } = packBLF(
+    parts,
+    req.sheet.width_mm,
+    req.sheet.height_mm,
+    req.spacing_mm,
+    req.rotation,
+  );
+  const total = sheets.length > 0
+    ? sheets.reduce((acc, s) => acc + s.efficiency, 0) / sheets.length
+    : 0;
+  const warnings: string[] = [];
+  if (unplaced > 0) warnings.push(`シートに収まらない部品が ${unplaced} 件あります`);
+  return {
+    sheets,
+    utilization: total,
+    unplaced,
+    warnings,
+  };
+}
+
+export async function mockNest(sid: string, req: NestRequest): Promise<{ job_id: string }> {
+  // Make sure the session exists so the polling endpoints have something to
+  // hand back. Throws the standard "unknown session" if not.
+  locateBundle(sid);
+  await new Promise((r) => setTimeout(r, 60));
+  const job_id = uid('job');
+  // C2: status は BE 形式 (``pending`` | ``running`` | ``completed`` | ``failed``)
+  _jobs.set(job_id, {
+    job: { job_id, status: 'pending', progress: 0, message: 'キューに登録しました' },
+    sid,
+    req,
+    startedAt: performance.now(),
+  });
+  return { job_id };
+}
+
+export async function mockGetJobStatus(job_id: string): Promise<Job> {
+  const entry = _jobs.get(job_id);
+  if (!entry) {
+    return { job_id, status: 'failed', progress: 0, error: `unknown job ${job_id}` };
+  }
+  // C2: 0 → pending (briefly) → running → completed
+  const elapsed = performance.now() - entry.startedAt;
+  if (entry.job.status === 'pending' && elapsed > 250) {
+    entry.job = { job_id, status: 'running', progress: 0.1, message: '初期化中…' };
+  }
+  if (entry.job.status === 'running') {
+    const p = Math.min(1, 0.1 + elapsed / 1800);
+    entry.job = {
+      job_id,
+      status: 'running',
+      progress: p,
+      message: p < 0.5
+        ? `部品を解析中… (${Math.round(p * 100)}%)`
+        : `シートに配置中… (${Math.round(p * 100)}%)`,
+    };
+    if (p >= 1) {
+      entry.result = buildNestResult(job_id, entry.sid, entry.req);
+      entry.job = {
+        job_id,
+        status: 'completed',
+        progress: 1,
+        message: `完了 (${entry.result.sheets.length} シート)`,
+      };
+    }
+  }
+  return { ...entry.job };
+}
+
+export async function mockGetNestResult(job_id: string): Promise<NestResult> {
+  const entry = _jobs.get(job_id);
+  if (!entry || !entry.result) {
+    throw new Error(`mock: nest result not ready for ${job_id}`);
+  }
+  // C4: BE-aligned Sheet shape (sheet_index / width_mm / height_mm / efficiency).
+  return {
+    sheets: entry.result.sheets.map((s) => ({
+      sheet_index: s.sheet_index,
+      width_mm: s.width_mm,
+      height_mm: s.height_mm,
+      placements: s.placements.map((p: NestPlacement) => ({ ...p })),
+      efficiency: s.efficiency,
+      used_area_mm2: s.used_area_mm2,
+      sheet_area_mm2: s.sheet_area_mm2,
+    })),
+    utilization: entry.result.utilization,
+    unplaced: entry.result.unplaced,
+    warnings: [...entry.result.warnings],
+  };
+}
+
+export async function mockExportNestSheet(job_id: string, sheet_index: number): Promise<Blob> {
+  const entry = _jobs.get(job_id);
+  if (!entry || !entry.result) throw new Error(`mock: nest result not ready for ${job_id}`);
+  const sh = entry.result.sheets.find((s) => s.sheet_index === sheet_index);
+  if (!sh) throw new Error(`mock: unknown sheet ${sheet_index}`);
+  const head = [
+    '0', 'SECTION', '2', 'ENTITIES',
+    `999  mock nest export — sheet ${sh.sheet_index} / ${sh.width_mm}x${sh.height_mm} mm`,
+    `999  placements=${sh.placements.length} eff=${(sh.efficiency * 100).toFixed(1)}%`,
+  ];
+  const placements = sh.placements.flatMap((p) => [
+    `999  ${p.file_id}: ${p.x_mm.toFixed(0)},${p.y_mm.toFixed(0)}` +
+      ` ${p.width_mm.toFixed(0)}x${p.height_mm.toFixed(0)}` +
+      `${p.rotation_deg ? ` R${p.rotation_deg}` : ''}`,
+  ]);
+  const lines = [...head, ...placements, '0', 'ENDSEC', '0', 'EOF'];
+  return new Blob([lines.join('\n')], { type: 'application/dxf' });
+}
+
+export async function mockSaveSession(name: string, sid: string): Promise<SavedSession> {
+  await new Promise((r) => setTimeout(r, 60));
+  const bundle = locateBundle(sid);
+  // Structural clone so a subsequent edit in the live session doesn't leak.
+  const clonedFiles = new Map<string, FileData>();
+  for (const [k, v] of bundle.files) clonedFiles.set(k, JSON.parse(JSON.stringify(v)));
+  const meta: SavedSession = {
+    name,
+    saved_at: new Date().toISOString(),
+    file_count: clonedFiles.size,
+    note: bundle.session.files[0]?.name,
+  };
+  _savedSessions.set(name, {
+    meta,
+    session: JSON.parse(JSON.stringify(bundle.session)) as Session,
+    files: clonedFiles,
+  });
+  return meta;
+}
+
+export async function mockListSavedSessions(): Promise<SavedSession[]> {
+  // Sort newest first to match the typical operator workflow.
+  return [..._savedSessions.values()]
+    .map((e) => ({ ...e.meta }))
+    .sort((a, b) => (a.saved_at < b.saved_at ? 1 : -1));
+}
+
+export async function mockLoadSession(name: string): Promise<Session> {
+  const entry = _savedSessions.get(name);
+  if (!entry) throw new Error(`保存済みセッション「${name}」が見つかりません`);
+  // Re-register the bundle under a fresh sid so the live session id matches
+  // the returned payload exactly (mirrors what the real backend would do).
+  const newSid = uid('sid');
+  const sessionCopy: Session = {
+    session_id: newSid,
+    files: entry.session.files.map((f) => ({ ...f })),
+    expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+  };
+  const fileMap = new Map<string, FileData>();
+  for (const [k, v] of entry.files) fileMap.set(k, JSON.parse(JSON.stringify(v)));
+  _store.set(newSid, {
+    session: sessionCopy,
+    files: fileMap,
+    chamfer: new Map(),
+    dimensions: new Map(),
+    vertexEdits: new Map(),
+    addedHoles: new Map(),
+    notes: new Map(),
+    bridges: new Map(),
+  });
+  return sessionCopy;
+}
+
+export async function mockGetTemplates(): Promise<Template[]> {
+  return _templates.map((t) => ({ ...t }));
+}
+
+export async function mockApplyTemplate(_sid: string, template_id: string): Promise<Template> {
+  const tpl = _templates.find((t) => t.template_id === template_id);
+  if (!tpl) throw new Error(`unknown template ${template_id}`);
+  // The live backend updates server-side per-session defaults; the mock just
+  // echoes the template back — the UI store applies the values locally.
+  return { ...tpl };
 }

@@ -63,6 +63,8 @@ const {
   setNotePendingAnchor,
   addNote,
   addBridge,
+  // Phase 5
+  nestingResult,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -546,6 +548,88 @@ const vertexHandles = computed<VertexHandle[]>(() => {
 function onFit() {
   // No-op until pan/zoom lands in Phase 2; viewBox already follows the file.
 }
+
+/* -------------------- Phase 5 — nesting result preview ----------------- */
+
+/** Show the nesting preview only when in nest mode AND we actually have
+ *  a result (so other modes never get the layered sheet overlay). */
+const showNestPreview = computed(
+  () => activeTool.value === 'nest' && !!nestingResult.value,
+);
+
+/** Layout sheets side-by-side with a fixed 80 mm gap, derive a viewBox that
+ *  covers everything plus an 8% margin. The result drives both the
+ *  positioned `<g>` blocks and the canvas SVG viewBox while nest mode is
+ *  active so the sheets are always visible without manual zoom. */
+interface SheetLayout {
+  index: number;
+  width: number;
+  height: number;
+  utilization: number;
+  /** X offset of the sheet's bottom-left in layout space. */
+  x: number;
+  /** Y offset of the sheet's bottom-left in layout space (0 here). */
+  y: number;
+  placements: { x: number; y: number; w: number; h: number; name: string; rotated: boolean }[];
+}
+const SHEET_GAP_MM = 80;
+const nestLayout = computed<{ sheets: SheetLayout[]; viewBox: string }>(() => {
+  const r = nestingResult.value;
+  if (!r || r.sheets.length === 0) {
+    return { sheets: [], viewBox: '0 0 1200 800' };
+  }
+  let cursor = 0;
+  let maxH = 0;
+  // C4: Sheet/Placement の wire field 名が BE と揃った
+  // (sheet_index / width_mm / height_mm / efficiency, placement.x_mm / y_mm /
+  // width_mm / height_mm / rotation_deg)。display 用 ``name`` は
+  // ``file_id`` (短縮表示) で代用する。
+  const sheets: SheetLayout[] = r.sheets.map((s) => {
+    // Display index is 1-based for human readability; backend is 0-based.
+    const displayIndex = (s.sheet_index ?? 0) + 1;
+    const layout: SheetLayout = {
+      index: displayIndex,
+      width: s.width_mm,
+      height: s.height_mm,
+      utilization: s.efficiency,
+      x: cursor,
+      y: 0,
+      placements: s.placements.map((p) => ({
+        x: p.x_mm,
+        y: p.y_mm,
+        w: p.width_mm,
+        h: p.height_mm,
+        name: p.file_id.length > 12 ? `${p.file_id.slice(0, 10)}…` : p.file_id,
+        rotated: (p.rotation_deg ?? 0) % 180 !== 0,
+      })),
+    };
+    cursor += s.width_mm + SHEET_GAP_MM;
+    if (s.height_mm > maxH) maxH = s.height_mm;
+    return layout;
+  });
+  const totalW = cursor - SHEET_GAP_MM;
+  const mx = totalW * 0.04;
+  const my = maxH * 0.08;
+  return {
+    sheets,
+    viewBox: `${-mx} ${-my} ${totalW + 2 * mx} ${maxH + 2 * my}`,
+  };
+});
+
+/** While the nest preview is active we replace the file's bounding-box
+ *  viewBox with the multi-sheet layout. Falls back to the regular file
+ *  viewBox in every other mode. */
+const effectiveViewBox = computed(() =>
+  showNestPreview.value ? nestLayout.value.viewBox : viewBox.value,
+);
+
+/** Display-side font size — keep labels readable at any sheet size. */
+function nestLabelSize(layout: SheetLayout): number {
+  return Math.max(10, Math.min(layout.width * 0.02, 32));
+}
+function nestPlacementLabelSize(layout: SheetLayout): number {
+  return Math.max(8, Math.min(layout.width * 0.012, 18));
+}
 </script>
 
 <template>
@@ -573,7 +657,7 @@ function onFit() {
     <svg
       ref="svgRef"
       class="canvas-svg"
-      :viewBox="viewBox"
+      :viewBox="effectiveViewBox"
       preserveAspectRatio="xMidYMid meet"
       @click="onCanvasClick"
       @mousemove="onCanvasMouseMove"
@@ -587,8 +671,73 @@ function onFit() {
         </marker>
       </defs>
 
+      <!-- ========== PHASE 5 NEST PREVIEW ========== -->
+      <!-- Rendered above the regular file path so the nest result obscures
+           other entities while in nest mode. The layout is in mm-space
+           (matching the sheet sizes) with the viewBox swap above. -->
+      <template v-if="showNestPreview">
+        <g
+          v-for="sh in nestLayout.sheets"
+          :key="`sh-${sh.index}`"
+          class="nest-sheet"
+          :transform="`translate(${sh.x} ${sh.y})`"
+        >
+          <!-- Sheet rectangle. Y-flipped so we keep visual Y-up like the file
+               canvas does: text/labels are placed inside this flipped group
+               with their own counter-flip. -->
+          <g :transform="`translate(0 ${sh.height}) scale(1 -1)`">
+            <rect
+              class="nest-sheet-bg"
+              x="0"
+              y="0"
+              :width="sh.width"
+              :height="sh.height"
+            />
+            <!-- Placed parts -->
+            <rect
+              v-for="(pl, i) in sh.placements"
+              :key="`sh-${sh.index}-pl-${i}`"
+              class="nest-placement"
+              :x="pl.x"
+              :y="pl.y"
+              :width="pl.w"
+              :height="pl.h"
+            />
+            <!-- Per-part label (counter-flipped). -->
+            <g
+              v-for="(pl, i) in sh.placements"
+              :key="`sh-${sh.index}-lbl-${i}`"
+              :transform="`scale(1, -1) translate(0, ${-2 * (pl.y + pl.h / 2)})`"
+            >
+              <text
+                class="nest-placement-label"
+                :x="pl.x + pl.w / 2"
+                :y="pl.y + pl.h / 2"
+                text-anchor="middle"
+                dominant-baseline="middle"
+                :font-size="nestPlacementLabelSize(sh)"
+              >{{ pl.name }}{{ pl.rotated ? ' ↻' : '' }}</text>
+            </g>
+          </g>
+          <!-- Sheet caption rendered above (no Y-flip, naturally upright). -->
+          <text
+            class="nest-sheet-caption"
+            :x="0"
+            :y="-10"
+            :font-size="nestLabelSize(sh)"
+          >シート {{ sh.index }} — {{ sh.width }} × {{ sh.height }} mm</text>
+          <text
+            class="nest-sheet-util"
+            :x="sh.width"
+            :y="-10"
+            text-anchor="end"
+            :font-size="nestLabelSize(sh)"
+          >歩留 {{ (sh.utilization * 100).toFixed(1) }}%</text>
+        </g>
+      </template>
+
       <!-- ========== LIVE FILE PATH ========== -->
-      <template v-if="hasFile">
+      <template v-if="hasFile && !showNestPreview">
         <!-- Y-flip wrapper: DXF is Y-up, SVG is Y-down. The list is
              `visibleEntities` so server-deleted ids never render — see
              stores/session.ts. -->
@@ -790,7 +939,7 @@ function onFit() {
       </template>
 
       <!-- ========== EMPTY-STATE: v3 demo SVG (unchanged) ========== -->
-      <template v-else>
+      <template v-else-if="!showNestPreview">
         <!-- Origin -->
         <g transform="translate(220, 660)">
           <line x1="0" y1="0" x2="18" y2="0" stroke="var(--cy)" stroke-width="1" />
@@ -1142,4 +1291,40 @@ function onFit() {
   box-sizing: border-box;
 }
 .note-input:focus { border-color: var(--cy); }
+
+/* Phase 5 — nest preview. Sheets render as subtle bg rectangles; each placed
+   part is a cyan-tinted rectangle so the operator can read at-a-glance how
+   the parts pack. Labels stay legible at any scale via the sizing helpers
+   in the script (nestLabelSize / nestPlacementLabelSize). */
+:deep(.nest-sheet-bg) {
+  fill: rgba(77, 207, 224, 0.04);
+  stroke: var(--cy);
+  stroke-width: 1.2;
+  opacity: 0.9;
+}
+:deep(.nest-placement) {
+  fill: rgba(77, 207, 224, 0.18);
+  stroke: var(--cy);
+  stroke-width: 0.8;
+}
+:deep(.nest-placement-label) {
+  fill: var(--cy);
+  font-family: var(--f-mono);
+  stroke: none;
+  pointer-events: none;
+}
+:deep(.nest-sheet-caption) {
+  fill: var(--t-1);
+  font-family: var(--f-mono);
+  font-weight: 600;
+  stroke: none;
+  pointer-events: none;
+}
+:deep(.nest-sheet-util) {
+  fill: var(--ok);
+  font-family: var(--f-mono);
+  font-weight: 600;
+  stroke: none;
+  pointer-events: none;
+}
 </style>

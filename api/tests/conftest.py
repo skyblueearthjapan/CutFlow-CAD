@@ -56,3 +56,19 @@ def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setenv("CUTFLOW_SESSION_ROOT", str(tmp_path))
     store = reset_store_for_tests(tmp_path)
     yield store
+
+
+@pytest.fixture()
+def isolated_queue(tmp_path, monkeypatch):
+    """Reset the global job queue singleton with a per-test root dir.
+
+    Required by any test that submits jobs via /api/session/{sid}/nest —
+    otherwise records / asyncio.Queue from a previous TestClient lifespan
+    leak between tests and the queue gets stuck waiting on a stale loop.
+    """
+
+    from services.job_queue import reset_queue_for_tests
+
+    monkeypatch.setenv("CUTFLOW_JOB_ROOT", str(tmp_path / "jobs"))
+    q = reset_queue_for_tests(root=tmp_path / "jobs", worker_count=2)
+    yield q

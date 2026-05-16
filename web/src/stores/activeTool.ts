@@ -49,9 +49,11 @@ export const toolMeta: Record<ToolMode, ToolMeta> = {
   hole:    { icon: 'i-hole-add',  name: '穴の追加',       sub: 'HOLE · 任意位置に追加',         pill: { cls: 'gh', text: '+0' } },
   note:    { icon: 'i-note',      name: '注記',           sub: 'NOTE · 加工指示の追記',         pill: { cls: 'gh', text: '0 件' } },
   bridge:  { icon: 'i-bridge',    name: 'ブリッジ',       sub: 'BRIDGE · 切断時の保持タブ',     pill: { cls: 'gh', text: '0 / 4' } },
+  nest:    { icon: 'i-nest',      name: 'ネスティング',   sub: 'NEST · 板取り最適化',           pill: { cls: 'gh', text: '0 シート' } },
 };
 
-/** 数字キー → モードのマップ。`document` の keydown ハンドラ用。 */
+/** 数字キー → モードのマップ。`document` の keydown ハンドラ用。
+ *  Phase 5 で '0' をネスティングに割り当て (テンキー / 上段どちらも対応)。 */
 export const keyToMode: Record<string, ToolMode> = {
   '1': 'outer',
   '2': 'delete',
@@ -62,4 +64,5 @@ export const keyToMode: Record<string, ToolMode> = {
   '7': 'hole',
   '8': 'note',
   '9': 'bridge',
+  '0': 'nest',
 };

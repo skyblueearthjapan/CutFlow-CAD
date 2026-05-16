@@ -1,0 +1,68 @@
+{
+  "templates": [
+    {
+      "id": "ss400-t9-3mm",
+      "name": "SS400 t9 / 3mm代",
+      "material": "SS400",
+      "thickness_mm": 9.0,
+      "default_offset_mm": 3.0,
+      "description": "一般構造用圧延鋼材 t9。標準加工代3mm。"
+    },
+    {
+      "id": "ss400-t6-2mm",
+      "name": "SS400 t6 / 2mm代",
+      "material": "SS400",
+      "thickness_mm": 6.0,
+      "default_offset_mm": 2.0,
+      "description": "SS400 中板 t6。加工代2mm。"
+    },
+    {
+      "id": "ss400-t12-3mm",
+      "name": "SS400 t12 / 3mm代",
+      "material": "SS400",
+      "thickness_mm": 12.0,
+      "default_offset_mm": 3.0,
+      "description": "SS400 厚板 t12。標準加工代3mm。"
+    },
+    {
+      "id": "ss400-t16-4mm",
+      "name": "SS400 t16 / 4mm代",
+      "material": "SS400",
+      "thickness_mm": 16.0,
+      "default_offset_mm": 4.0,
+      "description": "SS400 t16。厚物用4mm代。"
+    },
+    {
+      "id": "sphc-t3-1mm",
+      "name": "SPHC t3 / 1mm代",
+      "material": "SPHC",
+      "thickness_mm": 3.0,
+      "default_offset_mm": 1.0,
+      "description": "熱間圧延薄板 t3。最小加工代1mm。"
+    },
+    {
+      "id": "sus304-t6-2mm",
+      "name": "SUS304 t6 / 2mm代",
+      "material": "SUS304",
+      "thickness_mm": 6.0,
+      "default_offset_mm": 2.0,
+      "description": "ステンレス SUS304 t6。"
+    },
+    {
+      "id": "sus304-t9-3mm",
+      "name": "SUS304 t9 / 3mm代",
+      "material": "SUS304",
+      "thickness_mm": 9.0,
+      "default_offset_mm": 3.0,
+      "description": "ステンレス SUS304 t9。"
+    },
+    {
+      "id": "a5052-t5-2mm",
+      "name": "A5052 t5 / 2mm代",
+      "material": "A5052",
+      "thickness_mm": 5.0,
+      "default_offset_mm": 2.0,
+      "description": "アルミ A5052 t5。"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 左ツールレール (64px)。9ツール3グループ(編集/作図/出力) + ネスティング(SOON)。
+// 左ツールレール (64px)。9ツール3グループ(編集/作図/出力) + ネスティング(Phase 5)。
 // クリックで activeTool を切替、`body[data-mode]` は store の watch が同期。
 import { computed } from 'vue';
 import { useActiveTool } from '../stores/activeTool';
@@ -14,7 +14,7 @@ interface RailItem {
   badge?: string;
 }
 
-const { currentFile, totalDeleteCandidates } = useSession();
+const { currentFile, totalDeleteCandidates, nestingResult } = useSession();
 
 // Delete badge is dynamic when a file is loaded; otherwise the v3 demo value.
 const deleteBadge = computed(() =>
@@ -35,9 +35,19 @@ const drawTools: RailItem[] = [
   { mode: 'note', icon: 'i-note',      label: '注記',   key: '8' },
 ];
 
-const outputTools: RailItem[] = [
-  { mode: 'bridge', icon: 'i-bridge', label: 'ブリッジ', key: '9' },
-];
+// Phase 5 — ネスティング is now a real active mode bound to key 0.
+const outputTools = computed<RailItem[]>(() => [
+  { mode: 'bridge', icon: 'i-bridge', label: 'ブリッジ',   key: '9' },
+  {
+    mode: 'nest',
+    icon: 'i-nest',
+    label: 'ネスティング',
+    key: '0',
+    badge: nestingResult.value
+      ? String(nestingResult.value.sheets.length)
+      : undefined,
+  },
+]);
 
 const { activeTool, setTool } = useActiveTool();
 const current = computed(() => activeTool.value);
@@ -88,11 +98,7 @@ const current = computed(() => activeTool.value);
       <svg><use :href="`#${t.icon}`" /></svg>
       <span>{{ t.label }}</span>
       <span class="rt-key">{{ t.key }}</span>
-    </button>
-    <button class="rail-tool soon" disabled>
-      <svg><use href="#i-nest" /></svg>
-      <span>ネスティング</span>
-      <span class="rt-soon">SOON</span>
+      <span v-if="t.badge" class="rt-badge">{{ t.badge }}</span>
     </button>
   </aside>
 </template>

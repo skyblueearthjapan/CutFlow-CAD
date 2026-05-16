@@ -57,6 +57,16 @@ const {
   notes,
   bridges,
   vertexEdits,
+  // Phase 5 — history + templates
+  savedSessions,
+  templates,
+  isSavingSession,
+  isLoadingTemplates,
+  saveCurrentSession,
+  listSavedSessions,
+  loadSavedSession,
+  loadTemplates,
+  applyTemplate,
 } = useSession();
 
 /** Format radio + checkbox state local to the dropdown UI. */
@@ -77,14 +87,52 @@ function closeExport() {
   exportOpen.value = false;
 }
 
+/** Phase 5 — settings (⚙) dropdown: 履歴 + テンプレ. */
+const settingsOpen = ref(false);
+const settingsRoot = ref<HTMLElement | null>(null);
+const settingsTab = ref<'history' | 'templates'>('history');
+const newSessionName = ref<string>('');
+function toggleSettings() {
+  settingsOpen.value = !settingsOpen.value;
+  if (settingsOpen.value) {
+    // Refresh on open so the dropdown reflects the latest server state.
+    listSavedSessions();
+    if (templates.value.length === 0) loadTemplates();
+  }
+}
+function closeSettings() {
+  settingsOpen.value = false;
+}
+async function onSaveSession() {
+  const name = newSessionName.value.trim();
+  if (!name) return;
+  await saveCurrentSession(name);
+  newSessionName.value = '';
+}
+async function onLoadSession(name: string) {
+  await loadSavedSession(name);
+  closeSettings();
+}
+async function onApplyTemplate(template_id: string) {
+  await applyTemplate(template_id);
+}
+
 /** Click-outside / Escape to close the dropdown. */
 function onDocClick(e: MouseEvent) {
-  if (!exportOpen.value) return;
-  const root = exportRoot.value;
-  if (root && !root.contains(e.target as Node)) closeExport();
+  if (exportOpen.value) {
+    const root = exportRoot.value;
+    if (root && !root.contains(e.target as Node)) closeExport();
+  }
+  if (settingsOpen.value) {
+    const root = settingsRoot.value;
+    if (root && !root.contains(e.target as Node)) closeSettings();
+  }
 }
 function onDocKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') closeExport();
+  if (e.key === 'Escape') {
+    closeExport();
+    closeSettings();
+  }
 }
 
 async function onDownload() {
@@ -417,6 +465,107 @@ const titleParts = computed(() => {
         </div>
       </div>
 
+      <!-- Phase 5: settings (⚙) dropdown — 履歴 + テンプレ. -->
+      <div class="settings-menu" ref="settingsRoot">
+        <button
+          class="kbd-hint"
+          @click="toggleSettings"
+          :aria-expanded="settingsOpen"
+          title="設定 (履歴 / テンプレ)"
+        >
+          設定
+          <span class="kbd">⚙</span>
+        </button>
+        <div v-if="settingsOpen" class="settings-panel" @click.stop>
+          <div class="set-tabs">
+            <button
+              class="set-tab"
+              :class="{ active: settingsTab === 'history' }"
+              @click="settingsTab = 'history'"
+            >履歴</button>
+            <button
+              class="set-tab"
+              :class="{ active: settingsTab === 'templates' }"
+              @click="settingsTab = 'templates'"
+            >テンプレート</button>
+          </div>
+
+          <!-- 履歴: 保存 + 一覧 -->
+          <template v-if="settingsTab === 'history'">
+            <div class="set-group">
+              <div class="set-glabel">現セッションを保存</div>
+              <div class="set-save-row">
+                <input
+                  v-model="newSessionName"
+                  type="text"
+                  class="set-input"
+                  :placeholder="currentSession ? '例: 250520-板取り' : 'セッション未読込'"
+                  :disabled="!currentSession || isSavingSession"
+                  @keydown.enter="onSaveSession"
+                />
+                <button
+                  class="btn primary set-save-btn"
+                  :disabled="!currentSession || !newSessionName.trim() || isSavingSession"
+                  @click="onSaveSession"
+                >
+                  {{ isSavingSession ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </div>
+            <div class="set-group">
+              <div class="set-glabel">保存済セッション</div>
+              <div v-if="savedSessions.length === 0" class="set-empty">
+                まだ保存はありません。
+              </div>
+              <div v-else class="set-list">
+                <button
+                  v-for="s in savedSessions"
+                  :key="s.name"
+                  class="set-row"
+                  @click="onLoadSession(s.name)"
+                >
+                  <div class="set-row-main">
+                    <b>{{ s.name }}</b>
+                    <span class="set-row-sub">
+                      {{ s.file_count }} files · {{ new Date(s.saved_at).toLocaleString('ja-JP') }}
+                    </span>
+                  </div>
+                  <span class="set-row-load">読み込み →</span>
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- テンプレート: 一覧 + 適用 -->
+          <template v-else>
+            <div class="set-group">
+              <div class="set-glabel">テンプレート一覧</div>
+              <div v-if="isLoadingTemplates" class="set-empty">読み込み中…</div>
+              <div v-else-if="templates.length === 0" class="set-empty">
+                テンプレートが登録されていません。
+              </div>
+              <div v-else class="set-list">
+                <div
+                  v-for="t in templates"
+                  :key="t.template_id"
+                  class="set-row set-row-tpl"
+                >
+                  <div class="set-row-main">
+                    <b>{{ t.name }}</b>
+                    <span class="set-row-sub">{{ t.description ?? '—' }}</span>
+                  </div>
+                  <button
+                    class="btn primary set-apply-btn"
+                    :disabled="!currentSession"
+                    @click="onApplyTemplate(t.template_id)"
+                  >適用</button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div class="user-chip">YT</div>
     </div>
   </div>
@@ -487,4 +636,136 @@ const titleParts = computed(() => {
   font-family: var(--f-mono);
 }
 .ex-input:focus { border-color: var(--cy); }
+
+/* Phase 5 — settings (⚙) dropdown. Same chrome palette as the export panel
+   so the two read as siblings of the same menu family. */
+.settings-menu {
+  position: relative;
+  display: inline-flex;
+}
+.settings-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  width: 320px;
+  padding: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 22px -6px rgba(0, 0, 0, 0.6);
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.set-tabs {
+  display: flex; gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-1);
+}
+.set-tab {
+  flex: 1;
+  height: 26px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--t-3);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.set-tab:hover { color: var(--t-1); border-color: var(--line-3); }
+.set-tab.active {
+  background: var(--cy-soft);
+  color: var(--cy);
+  border-color: rgba(77,207,224,0.4);
+}
+.set-group {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.set-glabel {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--t-4);
+}
+.set-save-row {
+  display: flex; gap: 6px;
+}
+.set-input {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: var(--bg-1);
+  color: var(--t-1);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
+}
+.set-input:focus { border-color: var(--cy); }
+.set-save-btn {
+  white-space: nowrap;
+  padding: 0 12px;
+  height: 28px;
+  font-size: 11px;
+}
+.set-empty {
+  font-size: 11.5px;
+  color: var(--t-4);
+  padding: 8px 0;
+}
+.set-list {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  color: var(--t-1);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.set-row:hover {
+  border-color: var(--line-3);
+  background: var(--bg-4);
+}
+.set-row.set-row-tpl { cursor: default; }
+.set-row.set-row-tpl:hover { background: var(--bg-3); }
+.set-row-main {
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 0; flex: 1;
+}
+.set-row-main b {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.set-row-sub {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.set-row-load {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--cy);
+  white-space: nowrap;
+}
+.set-apply-btn {
+  white-space: nowrap;
+  padding: 0 10px;
+  height: 24px;
+  font-size: 10.5px;
+}
 </style>

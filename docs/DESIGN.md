@@ -105,8 +105,11 @@
 - 切断時の保持タブを外径に残す（部品脱落防止）
 - ブリッジ幅・推奨個数（重量より算出）・等間隔配置
 
-#### ネスティング（SOON）
-- 複数部品を1枚の板に最適配置（Phase 4 以降）
+#### ネスティング (Phase 5 — 実装済)
+- 複数部品を 1 枚の板に Bottom-Left-Fill (BLF) で最適配置
+- POST `/api/session/{sid}/nest` で非同期ジョブ投入、`GET /api/jobs/{job_id}` で進捗、`GET /api/jobs/{job_id}/result` で結果取得
+- シート別 DXF は `GET /api/jobs/{job_id}/result/sheets/{idx}/export?format=dxf`
+- 真の No-Fit Polygon (凹形対応) は Phase 6 で追加予定
 
 ---
 

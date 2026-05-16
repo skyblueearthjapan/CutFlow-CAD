@@ -282,9 +282,19 @@ Phase 1 以降で以下の変数が追加される予定です:
 
 ---
 
+## 社内公開 (Phase 4)
+
+LINE WORKS VPS から Tailscale Funnel 経由で社内に公開する手順は
+[`deploy/tailscale-funnel.md`](../deploy/tailscale-funnel.md) を参照。
+スクリプトは `deploy/tailscale-setup.sh` (Funnel 設定) と
+`deploy/vps-deploy.sh` (アプリ更新) の 2 本。
+
+---
+
 ## 関連ドキュメント
 
 - [README.md](../README.md) — プロジェクト概要・フェーズ一覧
 - [ARCHITECTURE.md](ARCHITECTURE.md) — 技術構成・システム設計
 - [DESIGN.md](DESIGN.md) — 機能仕様・UI 設計
 - [ROADMAP.md](ROADMAP.md) — 段階リリース計画 (Phase 0〜5)
+- [deploy/tailscale-funnel.md](../deploy/tailscale-funnel.md) — 社内公開手順

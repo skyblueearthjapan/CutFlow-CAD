@@ -36,6 +36,10 @@ import type {
   Entity,
   FileData,
   HolePatternRequest,
+  Job,
+  NestAlgorithm,
+  NestRequest,
+  NestResult,
   Note,
   NotePreset,
   OffsetRequest,
@@ -43,8 +47,10 @@ import type {
   OuterDetectionResult,
   PdfExportOptions,
   PdfFrameOption,
+  SavedSession,
   Session,
   SnapResult,
+  Template,
 } from '../types/dxf';
 import { useActiveTool } from './activeTool';
 
@@ -192,6 +198,31 @@ const _isAddingDimension = ref(false);
 const _isAddingHole = ref(false);
 const _isAddingNote = ref(false);
 const _isAddingBridge = ref(false);
+
+/* ------------------- Phase 5 — nesting / history / templates --------------- */
+/** Active nesting job (null when no job has been kicked off yet). */
+const _nestingJob = ref<Job | null>(null);
+/** Nesting result of the most recently completed job. */
+const _nestingResult = ref<NestResult | null>(null);
+/** Saved-session catalogue (lazily loaded on the first /history open). */
+const _savedSessions = ref<SavedSession[]>([]);
+/** Available templates (lazily loaded on the first templates panel open). */
+const _templates = ref<Template[]>([]);
+/** Inspector form state for the nest panel. */
+const _nestSheetWidth = ref<number>(1500);
+const _nestSheetHeight = ref<number>(3000);
+const _nestSheetQuantity = ref<number>(1);
+const _nestSpacingMm = ref<number>(3);
+// C1: BE 既定アルゴリズム名 (Phase 5 は ``bottom_left`` のみ)
+const _nestAlgorithm = ref<NestAlgorithm>('bottom_left');
+const _nestAllowRotate = ref<boolean>(true);
+/** File ids the operator has ticked for the next run. Defaults to "all" via
+ *  the derived ``nestSelectedFileIds`` getter (empty selection = include
+ *  every loaded part). */
+const _nestSelectedFileIds = ref<Set<string>>(new Set());
+const _isRunningNest = ref<boolean>(false);
+const _isSavingSession = ref<boolean>(false);
+const _isLoadingTemplates = ref<boolean>(false);
 
 /** Assembly-drawing filename pattern. Mirror of the server-side regex in
  *  api/routers/session.py — kept in sync manually since duplicating across
@@ -1252,6 +1283,280 @@ export function useSession() {
     _bridgeRecommended.value = Math.max(1, Math.min(20, Math.round(n)));
   }
 
+  /* -------------------- Phase 5 — nesting / history / templates ---------- */
+
+  /** Toggle a file in/out of the nesting selection. Empty selection = "all". */
+  function toggleNestFile(fid: string): void {
+    const next = new Set(_nestSelectedFileIds.value);
+    if (next.has(fid)) next.delete(fid);
+    else next.add(fid);
+    _nestSelectedFileIds.value = next;
+  }
+  function setNestFiles(ids: string[]): void {
+    _nestSelectedFileIds.value = new Set(ids);
+  }
+  function clearNestFiles(): void {
+    _nestSelectedFileIds.value = new Set();
+  }
+  function setNestSheetWidth(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    _nestSheetWidth.value = Math.max(50, Math.min(10000, Math.round(mm)));
+  }
+  function setNestSheetHeight(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    _nestSheetHeight.value = Math.max(50, Math.min(20000, Math.round(mm)));
+  }
+  function setNestSpacing(mm: number): void {
+    if (!Number.isFinite(mm)) return;
+    _nestSpacingMm.value = Math.max(0, Math.min(50, Number(mm.toFixed(1))));
+  }
+  function setNestSheetQuantity(n: number): void {
+    if (!Number.isFinite(n)) return;
+    // H9: BE side caps at 20 — clamp on the UI too to avoid 422s.
+    _nestSheetQuantity.value = Math.max(1, Math.min(20, Math.round(n)));
+  }
+  function setNestAlgorithm(a: NestAlgorithm): void { _nestAlgorithm.value = a; }
+  function setNestAllowRotate(on: boolean): void { _nestAllowRotate.value = on; }
+
+  /** Poll handle so a follow-up run cancels the previous timer. */
+  let _nestPollHandle: number | null = null;
+  /** Track the currently-polled job_id so out-of-order responses don't trip us. */
+  let _nestActiveJobId: string | null = null;
+  function stopNestPolling(): void {
+    if (_nestPollHandle !== null) {
+      window.clearTimeout(_nestPollHandle);
+      _nestPollHandle = null;
+    }
+    _nestActiveJobId = null;
+  }
+
+  /** Issue one /api/jobs/{id} poll, recurse at 1 s while still running.
+   *
+   *  C2/C6: status enum is the backend wire form
+   *  (``pending`` | ``running`` | ``completed`` | ``failed``). We use an
+   *  **explicit allow-list** for the re-schedule path — anything outside
+   *  that list (unknown status, malformed payload) stops polling so we
+   *  never spin forever. (M7) `_nestActiveJobId` guards against a stale
+   *  poll from a previous job firing after a fresh ``runNesting``. */
+  async function pollJob(job_id: string): Promise<void> {
+    if (_nestActiveJobId !== null && _nestActiveJobId !== job_id) {
+      // A newer job has taken over — let the new poll loop run.
+      return;
+    }
+    try {
+      const j = await api.getJobStatus(job_id);
+      // The result must still be for the active job. If runNesting kicked
+      // a new job mid-flight we discard this response.
+      if (_nestActiveJobId !== null && _nestActiveJobId !== job_id) return;
+      _nestingJob.value = j;
+      if (j.status === 'completed') {
+        await loadNestingResult(job_id);
+        stopNestPolling();
+        return;
+      }
+      if (j.status === 'failed') {
+        setError(j.error ?? 'ネスティングジョブが失敗しました');
+        stopNestPolling();
+        return;
+      }
+      if (j.status === 'pending' || j.status === 'running') {
+        // Re-arm 1 s timer (closure pins job_id explicitly).
+        _nestPollHandle = window.setTimeout(() => pollJob(job_id), 1000);
+        return;
+      }
+      // Unknown / unsupported status — bail out instead of looping forever.
+      // eslint-disable-next-line no-console
+      console.warn(`pollJob: unexpected job status ${String(j.status)} — stopping`);
+      stopNestPolling();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ジョブ状態の取得に失敗しました');
+      stopNestPolling();
+    }
+  }
+
+  /** Kick off a nesting job and start polling immediately. */
+  async function runNesting(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    if (!sid) {
+      setError('セッションがアクティブではありません');
+      return;
+    }
+    setError(null);
+    // M7: stop any previous polling so a stale timer can't write into the
+    // newly-running job (and so the active-job-id guard above resets).
+    stopNestPolling();
+    _nestingResult.value = null;
+    _isRunningNest.value = true;
+    try {
+      // C1: BE-shaped NestRequest (sheet wrapper + ``rotation`` flag + algo enum).
+      // If the operator left ``_nestSelectedFileIds`` empty, default to every
+      // file in the session so the backend doesn't 422 on an empty list.
+      const explicitIds = [..._nestSelectedFileIds.value];
+      const fileIds = explicitIds.length > 0
+        ? explicitIds
+        : (_currentSession.value?.files ?? []).map((f) => f.file_id);
+      const req: NestRequest = {
+        file_ids: fileIds,
+        sheet: {
+          width_mm: _nestSheetWidth.value,
+          height_mm: _nestSheetHeight.value,
+          quantity: _nestSheetQuantity.value,
+        },
+        spacing_mm: _nestSpacingMm.value,
+        algorithm: _nestAlgorithm.value,
+        rotation: _nestAllowRotate.value,
+      };
+      const { job_id } = await api.nest(sid, req);
+      _nestActiveJobId = job_id;
+      _nestingJob.value = {
+        job_id,
+        status: 'pending',
+        progress: 0,
+        message: 'キューに登録しました',
+      };
+      // Kick off polling without awaiting so the UI returns immediately.
+      pollJob(job_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ネスティング実行に失敗しました');
+    } finally {
+      _isRunningNest.value = false;
+    }
+  }
+
+  /** Fetch the full sheets payload for a completed job. */
+  async function loadNestingResult(job_id: string): Promise<void> {
+    try {
+      const r = await api.getNestResult(job_id);
+      _nestingResult.value = r;
+      if (r.warnings.length > 0) {
+        // Surface the first warning as a non-blocking error banner; the
+        // result panel still renders so the operator can see partial output.
+        setError(r.warnings[0]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ネスティング結果の取得に失敗しました');
+    }
+  }
+
+  /** Download a single sheet as DXF. */
+  async function exportNestSheet(sheet_index: number): Promise<void> {
+    const job = _nestingJob.value;
+    if (!job) return;
+    try {
+      const blob = await api.exportNestSheet(job.job_id, sheet_index);
+      downloadBlob(blob, `nest_${job.job_id}_sheet${sheet_index}.dxf`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'シートDXFの書き出しに失敗しました');
+    }
+  }
+
+  /** Persist the current session under the given name. Refreshes the
+   *  cached list so the History dropdown shows it immediately. */
+  async function saveCurrentSession(name: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    if (!sid) {
+      setError('保存対象のセッションがありません');
+      return;
+    }
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('名前を入力してください');
+      return;
+    }
+    setError(null);
+    _isSavingSession.value = true;
+    try {
+      await api.saveSession(trimmed, sid);
+      _savedSessions.value = await api.listSavedSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'セッション保存に失敗しました');
+    } finally {
+      _isSavingSession.value = false;
+    }
+  }
+
+  /** Refresh the saved-session list (used by the Header history dropdown). */
+  async function listSavedSessions(): Promise<void> {
+    try {
+      _savedSessions.value = await api.listSavedSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '履歴の取得に失敗しました');
+    }
+  }
+
+  /** Load a saved session — replaces the current session and refreshes the
+   *  active file's payload so the canvas snaps to the new geometry. */
+  async function loadSavedSession(name: string): Promise<void> {
+    setError(null);
+    try {
+      const next = await api.loadSession(name);
+      _currentSession.value = next;
+      _files.value = new Map();
+      _selectedForDelete.value = new Set();
+      _nestingResult.value = null;
+      _nestingJob.value = null;
+      if (next.files.length > 0) await selectFile(next.files[0].file_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'セッションの読み込みに失敗しました');
+    }
+  }
+
+  /** Lazy-load templates the first time the panel opens. */
+  async function loadTemplates(): Promise<void> {
+    _isLoadingTemplates.value = true;
+    try {
+      _templates.value = await api.getTemplates();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'テンプレート取得に失敗しました');
+    } finally {
+      _isLoadingTemplates.value = false;
+    }
+  }
+
+  /** Apply a template — server-side write + local Inspector defaults so the
+   *  operator sees the change without a tab switch.
+   *
+   *  C5: Backend response is ``ApplyTemplateResponse`` which embeds a full
+   *  ``Template`` payload (under ``template``) plus the canonical
+   *  ``default_offset_mm`` it just wrote. We sync the inspector defaults
+   *  from either source so a backend that hasn't shipped the embedded
+   *  template yet still leaves the offset right. */
+  async function applyTemplate(template_id: string): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    if (!sid) {
+      setError('適用先のセッションがありません');
+      return;
+    }
+    setError(null);
+    try {
+      const resp = await api.applyTemplate(sid, template_id);
+      // H7: 全件 skipped でも 207 で body は返ってくる — UI 既定値は更新する
+      // が、ユーザーには警告を出す。
+      if (resp.applied_to.length === 0 && resp.skipped.length > 0) {
+        setError(
+          `テンプレートが ${resp.skipped.length} ファイルに適用できませんでした (template_id=${resp.template_id})`,
+        );
+      }
+      const tpl = resp.template;
+      const offset = typeof resp.default_offset_mm === 'number'
+        ? resp.default_offset_mm
+        : tpl?.spacing_mm;
+      if (typeof offset === 'number') {
+        _defaultOffsetMm.value = offset;
+        _nestSpacingMm.value = offset;
+      }
+      if (tpl?.sheet_width && typeof tpl.sheet_width === 'number') {
+        _nestSheetWidth.value = tpl.sheet_width;
+      }
+      if (tpl?.sheet_height && typeof tpl.sheet_height === 'number') {
+        _nestSheetHeight.value = tpl.sheet_height;
+      }
+      if (tpl?.material) setPdfMaterial(tpl.material);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'テンプレート適用に失敗しました');
+    }
+  }
+
   return {
     // state
     currentSession: _currentSession,
@@ -1411,6 +1716,40 @@ export function useSession() {
     registerFolderPicker,
     openFilePicker,
     openFolderPicker,
+    // Phase 5 state
+    nestingJob: _nestingJob,
+    nestingResult: _nestingResult,
+    savedSessions: _savedSessions,
+    templates: _templates,
+    nestSheetWidth: _nestSheetWidth,
+    nestSheetHeight: _nestSheetHeight,
+    nestSheetQuantity: _nestSheetQuantity,
+    nestSpacingMm: _nestSpacingMm,
+    nestAlgorithm: _nestAlgorithm,
+    nestAllowRotate: _nestAllowRotate,
+    nestSelectedFileIds: _nestSelectedFileIds,
+    isRunningNest: _isRunningNest,
+    isSavingSession: _isSavingSession,
+    isLoadingTemplates: _isLoadingTemplates,
+    // Phase 5 actions
+    toggleNestFile,
+    setNestFiles,
+    clearNestFiles,
+    setNestSheetWidth,
+    setNestSheetHeight,
+    setNestSheetQuantity,
+    setNestSpacing,
+    setNestAlgorithm,
+    setNestAllowRotate,
+    runNesting,
+    pollJob,
+    loadNestingResult,
+    exportNestSheet,
+    saveCurrentSession,
+    listSavedSessions,
+    loadSavedSession,
+    loadTemplates,
+    applyTemplate,
   };
 }
 

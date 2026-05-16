@@ -512,3 +512,214 @@ class AnnotationsResponse(BaseModel):
     bridges: list[Bridge] = Field(default_factory=list)
     added_holes: list[AddedHole] = Field(default_factory=list)
     edits: list[EditedVertex] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — nesting / jobs / saved sessions / templates
+# ---------------------------------------------------------------------------
+
+
+NestAlgorithm = Literal["bottom_left", "no_fit_polygon"]
+"""ネスティングアルゴリズム。Phase 5 は ``bottom_left`` のみ実装。"""
+
+JobStatusLiteral = Literal["pending", "running", "completed", "failed"]
+
+
+class Sheet(BaseModel):
+    """ネスティング用の板サイズ。``quantity`` は板の枚数 (将来複数板対応).
+
+    Phase 5 H9: ``quantity`` の上限を 20 に下げ、極端な多枚数指定での
+    BLF 走査時間爆発 (parts × sheets) を抑制する。
+    """
+
+    width_mm: float = Field(..., gt=0.0, le=10000.0)
+    height_mm: float = Field(..., gt=0.0, le=10000.0)
+    quantity: int = Field(1, ge=1, le=20)
+
+
+class NestRequest(BaseModel):
+    """``POST /api/session/{sid}/nest`` のリクエスト。
+
+    ``file_ids`` は同じセッション内のファイル ID。各ファイルの外径
+    (確定済) + 加工代を使用して矩形パッキングする。``rotation`` が True
+    の場合 0°/90°/180°/270° を試行し最も歩留まりの良い向きを採用。
+    """
+
+    file_ids: list[str] = Field(default_factory=list, min_length=1, max_length=50)
+    sheet: Sheet
+    spacing_mm: float = Field(5.0, ge=0.0, le=200.0)
+    algorithm: NestAlgorithm = "bottom_left"
+    rotation: bool = True
+
+
+class NestPlacement(BaseModel):
+    """1 部品の配置結果 (シート上)."""
+
+    file_id: str
+    sheet_index: int = 0
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    rotation_deg: int = 0
+    width_mm: float = 0.0
+    height_mm: float = 0.0
+
+
+class NestSheetResult(BaseModel):
+    """1 枚の板の結果サマリ.
+
+    Phase 5 M1:
+    - ``used_area_mm2`` / ``efficiency`` は **padding (加工代) 込み bbox 面積** ベース。
+    - ``placed_part_area_mm2`` は padding を抜いた純粋な部品 bbox 面積 (raw)。
+      Phase 5 では暫定的に ``used_area_mm2`` と同値で返している (router/service
+      で raw を持ち回せない構造) — Phase 6 で正確化予定。
+    """
+
+    sheet_index: int = 0
+    width_mm: float = 0.0
+    height_mm: float = 0.0
+    placements: list[NestPlacement] = Field(default_factory=list)
+    used_area_mm2: float = 0.0
+    placed_part_area_mm2: float = 0.0
+    sheet_area_mm2: float = 0.0
+    efficiency: float = 0.0  # used_area / sheet_area
+
+
+class NestResult(BaseModel):
+    """ネスティング全体の結果."""
+
+    sheets: list[NestSheetResult] = Field(default_factory=list)
+    placed_count: int = 0
+    unplaced_file_ids: list[str] = Field(default_factory=list)
+    total_efficiency: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class NestResultEnvelope(BaseModel):
+    """``GET /api/jobs/{job_id}/result`` のラッパ.
+
+    Frontend (``getNestResult``) は ``{sheets, unplaced, warnings, utilization}``
+    の形を期待しているため、サーバー側で完成ジョブ結果をこの形に整えて返す。
+    ``unplaced`` は数値 (件数) を返却 (FE 側 ``NestResult.unplaced: number``)。
+    """
+
+    sheets: list[NestSheetResult] = Field(default_factory=list)
+    unplaced: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    utilization: float = 0.0
+
+
+class JobCreated(BaseModel):
+    """非同期ジョブ作成レスポンス."""
+
+    job_id: str
+    status: JobStatusLiteral = "pending"
+
+
+class JobStatus(BaseModel):
+    """``GET /api/jobs/{job_id}`` レスポンス."""
+
+    job_id: str
+    kind: str = "nest"
+    status: JobStatusLiteral = "pending"
+    progress: float = Field(0.0, ge=0.0, le=1.0)
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+# ---- Saved sessions ------------------------------------------------------
+
+
+class SaveSessionRequest(BaseModel):
+    """``POST /api/sessions/save`` body."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    session_id: str = Field(..., min_length=1, max_length=64)
+
+
+class SavedSessionMeta(BaseModel):
+    """1 件の保存済みセッションメタ."""
+
+    name: str
+    size_bytes: int
+    saved_at: datetime
+    file_count: int = 0
+
+
+class SavedSessionList(BaseModel):
+    saved: list[SavedSessionMeta] = Field(default_factory=list)
+
+
+class SavedSessionLoadResponse(BaseModel):
+    """``POST /api/sessions/load/{name}`` の戻り値 — Session 形式で返却 (H3).
+
+    Frontend ``loadSession`` は ``Session {session_id, files, expires_at}`` を
+    期待しているため、復元した session の SessionInfo をそのまま返す。
+    """
+
+    session_id: str
+    name: str = ""
+    file_count: int = 0
+    files: list[FileMeta] = Field(default_factory=list)
+    expires_at: datetime | None = None
+
+
+# ---- Templates -----------------------------------------------------------
+
+
+class Template(BaseModel):
+    """材質・板厚・加工代プリセット (api/data/templates.json).
+
+    Phase 5 H1: Frontend は ``template_id`` / ``spacing_mm`` を期待するため
+    alias を提供する。``populate_by_name=True`` により、JSON 読込側は従来通り
+    ``id`` / ``default_offset_mm`` で書ける一方、レスポンスは
+    ``model_dump(by_alias=True)`` で alias を含めた両キーが出る。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., min_length=1, max_length=64, alias="template_id")
+    name: str = Field(..., min_length=1, max_length=128)
+    material: str = Field(..., min_length=1, max_length=64)
+    thickness_mm: float = Field(..., gt=0.0, le=200.0)
+    default_offset_mm: float = Field(3.0, ge=0.0, le=200.0, alias="spacing_mm")
+    description: str | None = None
+
+
+class TemplateList(BaseModel):
+    templates: list[Template] = Field(default_factory=list)
+
+
+class ApplyTemplateResponse(BaseModel):
+    """テンプレ適用結果。各ファイルにオフセットを書き込んだか報告.
+
+    Phase 5 C5: ``template`` フィールドに full Template を含めて返却し、
+    Frontend が ``applyTemplate()`` で UI 既定値 (defaultOffsetMm /
+    pdfMaterial / nestSpacingMm 等) を一度に同期できるようにする。
+    """
+
+    template_id: str
+    session_id: str
+    applied_to: list[str] = Field(default_factory=list)  # file_ids
+    skipped: list[str] = Field(default_factory=list)
+    default_offset_mm: float = 0.0
+    template: Template | None = None
+
+
+# ---- Metrics -------------------------------------------------------------
+
+
+class MetricsSnapshot(BaseModel):
+    """``GET /api/metrics`` の即時スナップショット."""
+
+    uptime_sec: float = 0.0
+    request_count: int = 0
+    error_count: int = 0
+    avg_response_ms: float = 0.0
+    jobs_total: int = 0
+    jobs_completed: int = 0
+    jobs_failed: int = 0
+    jobs_running: int = 0
+    counters: dict[str, int] = Field(default_factory=dict)

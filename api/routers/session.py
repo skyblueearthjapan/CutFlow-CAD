@@ -106,6 +106,13 @@ async def upload(files: list[UploadFile] = File(...)) -> SessionInfo:
             len(skipped_assembly),
             skipped_assembly,
         )
+    # Phase 5 — Discord 通知 (no-op if disabled)
+    try:
+        from services.discord_notify import notify_session_created
+
+        notify_session_created(sess.session_id, len(accepted))
+    except Exception as exc:  # noqa: BLE001 — never block on notify
+        log.debug("session_created notify skipped: %s", exc)
     return SessionInfo(
         session_id=sess.session_id,
         files=[
@@ -139,4 +146,11 @@ async def delete_session(sid: str) -> None:
     deleted = get_store().delete(sid)
     if not deleted:
         raise HTTPException(status_code=404, detail="session not found")
+    # C7: 関連 job 結果も削除 — 部品 file_id / sheet 配置情報を残さない
+    try:
+        from services.job_queue import get_queue
+
+        get_queue().purge_for_session(sid)
+    except Exception as exc:  # noqa: BLE001 — never block delete on cleanup
+        log.debug("job purge after session delete failed: %s", exc)
     return None

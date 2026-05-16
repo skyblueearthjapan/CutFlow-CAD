@@ -375,6 +375,137 @@ export interface Note {
   rotation_deg?: number;
 }
 
+/* -------------------- Phase 5: nesting / history / templates -------------- */
+
+/** Nesting algorithm key. Phase 5 ships ``bottom_left`` only;
+ *  ``no_fit_polygon`` is reserved for Phase 6. Wire values match the backend
+ *  ``NestAlgorithm`` literal in ``api/models/schemas.py``. */
+export type NestAlgorithm = 'bottom_left' | 'no_fit_polygon';
+
+/** Sheet wrapper used inside ``NestRequest`` — mirrors backend ``Sheet``. */
+export interface NestSheetSpec {
+  width_mm: number;
+  height_mm: number;
+  /** Backend Sheet.quantity (Phase 5 cap=20). */
+  quantity: number;
+}
+
+/** Request body for POST /api/session/{sid}/nest. The backend enqueues the
+ *  request and returns a job_id; the frontend polls /api/jobs/{job_id}. */
+export interface NestRequest {
+  /** file_ids in the session that should be packed. */
+  file_ids: string[];
+  /** Sheet wrapper (width_mm / height_mm / quantity). */
+  sheet: NestSheetSpec;
+  /** Spacing between parts (加工代) in mm. */
+  spacing_mm: number;
+  /** Algorithm key — ``bottom_left`` for Phase 5. */
+  algorithm: NestAlgorithm;
+  /** Allow 0°/90° rotation per part to improve packing. */
+  rotation: boolean;
+}
+
+/** A single placed part on a sheet returned by the nesting result.
+ *  Phase 5 C4: BE-aligned field names (x_mm/y_mm/width_mm/height_mm/rotation_deg). */
+export interface NestPlacement {
+  file_id: string;
+  sheet_index: number;
+  x_mm: number;
+  y_mm: number;
+  width_mm: number;
+  height_mm: number;
+  rotation_deg: number;
+}
+
+/** A single sheet in the nesting result (BE-aligned). */
+export interface Sheet {
+  /** 0-based sheet index (backend ``sheet_index``). */
+  sheet_index: number;
+  width_mm: number;
+  height_mm: number;
+  placements: NestPlacement[];
+  /** ``used_area_mm2 / sheet_area_mm2``. */
+  efficiency: number;
+  used_area_mm2: number;
+  sheet_area_mm2: number;
+}
+
+/** Returned by GET /api/jobs/{job_id}/result — full nesting payload.
+ *  Backend envelope: ``{sheets, unplaced, warnings, utilization}``. */
+export interface NestResult {
+  sheets: Sheet[];
+  /** Overall material efficiency across all sheets (0..1). */
+  utilization: number;
+  /** Number of parts that did not fit (oversized for the chosen sheet). */
+  unplaced: number;
+  /** Free-form warnings (oversized parts, fallback rotation, ...). */
+  warnings: string[];
+}
+
+/** Job status as returned by GET /api/jobs/{job_id}.
+ *  Phase 5 C2: BE-aligned (``pending`` instead of ``queued``, ``completed``
+ *  instead of ``success``). */
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface Job {
+  job_id: string;
+  status: JobStatus;
+  /** 0..1 progress; only meaningful while status='running'. */
+  progress: number;
+  /** Short user-facing message ('シート 1/3 を配置中…'). */
+  message?: string;
+  /** Optional error detail when status='failed'. */
+  error?: string;
+}
+
+/** A material/spacing/sheet preset. Returned by GET /api/templates.
+ *
+ *  Phase 5 H1: Backend exposes both alias keys (``template_id`` / ``spacing_mm``)
+ *  AND canonical keys (``id`` / ``default_offset_mm``) thanks to Pydantic
+ *  alias serialisation. The frontend reads the alias-keyed form. */
+export interface Template {
+  template_id: string;
+  /** Display name ("SS400 t9 標準"). */
+  name: string;
+  /** Material identifier (e.g. ``"SS400"``). */
+  material: string;
+  /** Sheet thickness (mm). */
+  thickness_mm: number;
+  /** Short caption shown under the name in the Inspector. */
+  description?: string;
+  /** Default 加工代 (offset) in mm — applied to the offset tool's default. */
+  spacing_mm: number;
+  /** Optional alternative sheet size hint — Phase 5 templates do not yet
+   *  carry sheet dimensions but the wire stays open for Phase 6 additions. */
+  sheet_width?: number;
+  sheet_height?: number;
+}
+
+/** Returned by POST /api/sessions/{sid}/apply-template/{template_id}. (C5) */
+export interface ApplyTemplateResponse {
+  template_id: string;
+  session_id: string;
+  applied_to: string[];
+  skipped: string[];
+  default_offset_mm: number;
+  /** Full Template echoed back so the UI can sync defaults in one pass. */
+  template?: Template;
+}
+
+/** A persisted session listing (GET /api/sessions/saved). */
+export interface SavedSession {
+  /** Stable identifier — the operator-chosen name acts as the key. */
+  name: string;
+  /** ISO timestamp of last save. */
+  saved_at: string;
+  /** Number of DXF files included. */
+  file_count: number;
+  /** Archive size on disk (bytes) — only present on the live backend. */
+  size_bytes?: number;
+  /** Free-form note (currently the source session's first file name). */
+  note?: string;
+}
+
 /** A bridge (holding tab) left on an outer-loop edge (tool 9).
  *  Backend contract (C1): identified by ``id``; the bridge lives on
  *  ``edge_id`` (``E1..En``) at fractional ``position_ratio`` ∈ [0, 1]

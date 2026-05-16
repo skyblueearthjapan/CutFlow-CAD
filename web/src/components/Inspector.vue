@@ -21,7 +21,7 @@
 import { computed, ref, watch } from 'vue';
 import { useActiveTool, toolMeta } from '../stores/activeTool';
 import { useSession } from '../stores/session';
-import type { ChamferSpec, DimensionType, Entity, NotePreset } from '../types/dxf';
+import type { ChamferSpec, DimensionType, Entity, NestAlgorithm, NotePreset } from '../types/dxf';
 
 const { activeTool } = useActiveTool();
 const {
@@ -111,6 +111,29 @@ const {
   removeBridge,
   setEditSnap,
   setEditOrtho,
+  // Phase 5
+  currentSession,
+  nestingJob,
+  nestingResult,
+  nestSheetWidth,
+  nestSheetHeight,
+  nestSpacingMm,
+  nestAlgorithm,
+  nestAllowRotate,
+  nestSelectedFileIds,
+  isRunningNest,
+  toggleNestFile,
+  setNestSheetWidth,
+  setNestSheetHeight,
+  setNestSpacing,
+  setNestAlgorithm,
+  setNestAllowRotate,
+  runNesting,
+  exportNestSheet,
+  templates,
+  isLoadingTemplates,
+  loadTemplates,
+  applyTemplate,
 } = useSession();
 
 const meta = computed(() => toolMeta[activeTool.value]);
@@ -586,6 +609,87 @@ watch(
     loadCorners();
   },
 );
+
+/* -------------------- Phase 5 — nesting helpers ------------------------- */
+
+const SHEET_STEP = 50;          // mm — sheet dim step
+const NEST_SPACING_STEP = 0.5;  // mm — spacing step
+
+/** Pill text for the nest tool head — switches between the job-progress
+ *  state and the post-run sheet count. */
+const nestPillText = computed(() => {
+  if (isRunningNest.value || (nestingJob.value && nestingJob.value.status === 'running')) {
+    return `${Math.round((nestingJob.value?.progress ?? 0) * 100)}%`;
+  }
+  if (nestingResult.value) {
+    return `${nestingResult.value.sheets.length} シート`;
+  }
+  return meta.value.pill.text;
+});
+const nestPillCls = computed(() => {
+  if (nestingJob.value?.status === 'failed') return 'am';
+  if (nestingResult.value) return 'ok';
+  if (isRunningNest.value || nestingJob.value?.status === 'running') return 'cy';
+  return 'gh';
+});
+
+/** Files exposed to the nest checkbox list — defaults to the session list
+ *  (empty array when no session is active). */
+const nestSessionFiles = computed(() => currentSession.value?.files ?? []);
+
+/** Effective selection — when the user has not ticked anything we treat
+ *  it as "include every file". The store uses the same convention. */
+function isNestFileOn(fid: string): boolean {
+  if (nestSelectedFileIds.value.size === 0) return true;
+  return nestSelectedFileIds.value.has(fid);
+}
+
+/** Per-sheet utilisation as a percentage string. */
+function utilPct(u: number): string {
+  return `${(u * 100).toFixed(1)}%`;
+}
+
+// Phase 5 C1: BE-aligned algorithm enum. ``no_fit_polygon`` is reserved for
+// Phase 6 — keeping it in the rotation list lets the operator see "future"
+// algorithms but ``runNesting`` will currently reject anything but
+// ``bottom_left`` via a 400 from the backend.
+const NEST_ALGORITHMS: NestAlgorithm[] = ['bottom_left', 'no_fit_polygon'];
+const NEST_ALGORITHM_LABEL: Record<NestAlgorithm, string> = {
+  bottom_left: 'BLF (Bottom-Left-Fill)',
+  no_fit_polygon: 'No-Fit Polygon (Phase 6)',
+};
+function cycleNestAlgorithm() {
+  const i = NEST_ALGORITHMS.indexOf(nestAlgorithm.value);
+  setNestAlgorithm(NEST_ALGORITHMS[(i + 1) % NEST_ALGORITHMS.length]);
+}
+
+function bumpNestWidth(d: number) { setNestSheetWidth(nestSheetWidth.value + d); }
+function bumpNestHeight(d: number) { setNestSheetHeight(nestSheetHeight.value + d); }
+function bumpNestSpacing(d: number) { setNestSpacing(nestSpacingMm.value + d); }
+function onNestWidthInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setNestSheetWidth(n);
+}
+function onNestHeightInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setNestSheetHeight(n);
+}
+function onNestSpacingInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value);
+  if (Number.isFinite(n)) setNestSpacing(n);
+}
+
+/** Auto-load templates the first time the user enters nest mode so the
+ *  template chips render without an extra round-trip on click. */
+watch(
+  () => activeTool.value,
+  (mode) => {
+    if (mode !== 'nest') return;
+    if (templates.value.length === 0 && !isLoadingTemplates.value) {
+      loadTemplates();
+    }
+  },
+);
 </script>
 
 <template>
@@ -612,6 +716,8 @@ watch(
             ? notePillCls
             : activeTool === 'bridge'
             ? bridgePillCls
+            : activeTool === 'nest'
+            ? nestPillCls
             : meta.pill.cls
         "
       >{{
@@ -633,6 +739,8 @@ watch(
           ? notePillText
           : activeTool === 'bridge'
           ? bridgePillText
+          : activeTool === 'nest'
+          ? nestPillText
           : meta.pill.text
       }}</span>
     </div>
@@ -1470,6 +1578,171 @@ watch(
             @click="addBridgeAuto"
           >
             <svg><use href="#i-arrow-right" /></svg>自動配置
+          </button>
+        </div>
+      </template>
+
+      <!-- ========== nest (Phase 5 —板取り最適化) ========== -->
+      <template v-else-if="activeTool === 'nest'">
+        <div class="section-block">
+          <p class="lead">
+            複数部品を <em>1枚の板</em> に最適配置します。シートサイズ・加工代・回転を指定し、結果は右側キャンバスでプレビューします。
+          </p>
+
+          <h6 class="lbl">含めるファイル <span class="right">クリックで切替</span></h6>
+          <div v-if="nestSessionFiles.length === 0" class="placeholder-card">
+            <div class="ic"><svg><use href="#i-nest" /></svg></div>
+            <h5>DXFが未読込です</h5>
+            <p>ヘッダの <b style="color:var(--t-2)">ファイル</b> から部品DXFを読み込むとここに表示されます。</p>
+            <span class="meta">対象 0 件</span>
+          </div>
+          <div v-else class="entity-list">
+            <div
+              v-for="f in nestSessionFiles"
+              :key="f.file_id"
+              class="ent-row"
+              :class="{ on: isNestFileOn(f.file_id) }"
+              @click="toggleNestFile(f.file_id)"
+            >
+              <span class="cb"></span>
+              <div>
+                <div class="nm">{{ f.name }}</div>
+                <div class="ns">{{ (f.size / 1024).toFixed(1) }} KB</div>
+              </div>
+              <span class="cnt">{{ isNestFileOn(f.file_id) ? '✓' : '—' }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <h6 class="lbl">シートサイズ <span class="right">mm</span></h6>
+          <div class="kv">
+            <div><div class="k">幅 W</div><div class="ksub">SHEET-WIDTH</div></div>
+            <div class="num-step">
+              <button @click="bumpNestWidth(-SHEET_STEP)">−</button>
+              <input
+                type="text"
+                :value="nestSheetWidth"
+                @change="onNestWidthInput"
+              />
+              <span class="unit">mm</span>
+              <button @click="bumpNestWidth(SHEET_STEP)">+</button>
+            </div>
+          </div>
+          <div class="kv">
+            <div><div class="k">高さ H</div><div class="ksub">SHEET-HEIGHT</div></div>
+            <div class="num-step">
+              <button @click="bumpNestHeight(-SHEET_STEP)">−</button>
+              <input
+                type="text"
+                :value="nestSheetHeight"
+                @change="onNestHeightInput"
+              />
+              <span class="unit">mm</span>
+              <button @click="bumpNestHeight(SHEET_STEP)">+</button>
+            </div>
+          </div>
+          <div class="kv">
+            <div><div class="k">加工代</div><div class="ksub">SPACING</div></div>
+            <div class="num-step">
+              <button @click="bumpNestSpacing(-NEST_SPACING_STEP)">−</button>
+              <input
+                type="text"
+                :value="nestSpacingMm.toFixed(1)"
+                @change="onNestSpacingInput"
+              />
+              <span class="unit">mm</span>
+              <button @click="bumpNestSpacing(NEST_SPACING_STEP)">+</button>
+            </div>
+          </div>
+          <div class="kv">
+            <div><div class="k">アルゴリズム</div><div class="ksub">ALGORITHM</div></div>
+            <span class="v" style="cursor:pointer" @click="cycleNestAlgorithm">
+              {{ NEST_ALGORITHM_LABEL[nestAlgorithm] }}
+            </span>
+          </div>
+          <div class="kv">
+            <div><div class="k">90°回転を許可</div><div class="ksub">ROTATE</div></div>
+            <span class="v" style="cursor:pointer" @click="setNestAllowRotate(!nestAllowRotate)">
+              {{ nestAllowRotate ? 'ON' : 'OFF' }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Template chips — apply preset spacing/sheet/material in one click. -->
+        <div class="section-block">
+          <h6 class="lbl">テンプレート <span class="right">クリックで適用</span></h6>
+          <div v-if="templates.length === 0 && !isLoadingTemplates" class="placeholder-card">
+            <div class="ic"><svg><use href="#i-output" /></svg></div>
+            <h5>テンプレート未取得</h5>
+            <p>取得には一度ネスティングモードに入る必要があります。</p>
+            <span class="meta">テンプレ 0 件</span>
+          </div>
+          <div v-else-if="isLoadingTemplates" class="placeholder-card">
+            <span class="meta">読み込み中…</span>
+          </div>
+          <div v-else class="corner-list">
+            <div
+              v-for="t in templates"
+              :key="t.template_id"
+              class="corner-chip"
+              :title="t.description ?? t.name"
+              @click="applyTemplate(t.template_id)"
+            >
+              <span class="dot"></span>
+              {{ t.name }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Job progress strip — shown only while a job is in-flight. -->
+        <div
+          v-if="nestingJob && (nestingJob.status === 'pending' || nestingJob.status === 'running')"
+          class="warn-strip"
+          style="background:var(--cy-soft);color:var(--cy);border:1px solid rgba(77,207,224,0.25)"
+        >
+          <svg style="fill:var(--cy)"><use href="#i-warning" /></svg>
+          <div>
+            <b style="color:var(--cy)">
+              {{ nestingJob.status === 'pending' ? 'キューに登録中' : '計算中…' }}
+              ({{ Math.round((nestingJob.progress ?? 0) * 100) }}%)
+            </b><br />
+            {{ nestingJob.message ?? '部品をシートに配置しています。' }}
+          </div>
+        </div>
+
+        <!-- Result summary — only after a successful run. -->
+        <div v-if="nestingResult" class="summary">
+          <h6>ネスティング結果</h6>
+          <div class="summary-row">
+            <span class="k">シート数</span>
+            <span class="v big">{{ nestingResult.sheets.length }}<span class="u">枚</span></span>
+          </div>
+          <div class="summary-row">
+            <span class="k">歩留まり</span>
+            <span class="v">{{ utilPct(nestingResult.utilization) }}</span>
+          </div>
+          <div class="summary-row">
+            <span class="k">未配置</span>
+            <span class="v">{{ nestingResult.unplaced }} 件</span>
+          </div>
+        </div>
+
+        <div class="action-row">
+          <button
+            class="action-btn"
+            :disabled="!nestingResult || nestingResult.sheets.length === 0"
+            @click="nestingResult && nestingResult.sheets.forEach((s) => exportNestSheet(s.sheet_index))"
+          >
+            DXFとして書き出し
+          </button>
+          <button
+            class="action-btn cy"
+            :disabled="!currentSession || isRunningNest || (nestingJob?.status === 'running')"
+            @click="runNesting"
+          >
+            <svg><use href="#i-arrow-right" /></svg>
+            {{ isRunningNest || nestingJob?.status === 'running' ? '実行中…' : 'ネスティング実行' }}
           </button>
         </div>
       </template>
