@@ -653,6 +653,107 @@ async def delete_dimension(sid: str, fid: str, dim_id: str) -> None:
     return None
 
 
+@router.post("/dimensions/auto-outer")
+async def post_auto_outer_dimensions(sid: str, fid: str) -> dict:
+    """確定済み外径の bbox から、上方向(横長)と右方向(縦長)の linear dim を自動生成。
+
+    既存の dimensions 末尾に2件追加して返す。外径未確定 / 座標抽出失敗時は
+    409 / 500 で明示的にエラーを返し、フロントの toast でユーザに通知する。
+    """
+
+    import uuid
+
+    store, sf = _resolve(sid, fid)
+    saved_outer = store.read_outer(sid, fid)
+    if not saved_outer or saved_outer.get("status") != "success":
+        raise HTTPException(
+            status_code=409,
+            detail="外径が確定していません。先に外径を検出してください。",
+        )
+
+    loop = list(saved_outer.get("loop") or [])
+    if not loop:
+        raise HTTPException(status_code=409, detail="外径ループが空です")
+
+    try:
+        payload = parse_file(sf.path, file_id=fid, name=sf.name, outer_ids=loop)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("parse failed for %s", sf.path)
+        raise HTTPException(status_code=500, detail=f"parse failed: {exc}") from exc
+
+    loop_set = set(loop)
+    xs: list[float] = []
+    ys: list[float] = []
+    for e in payload.entities:
+        if e.id not in loop_set:
+            continue
+        g = e.geom or {}
+        if e.type == "LINE":
+            xs += [float(g.get("x1", 0.0)), float(g.get("x2", 0.0))]
+            ys += [float(g.get("y1", 0.0)), float(g.get("y2", 0.0))]
+        elif e.type in ("CIRCLE", "ARC"):
+            cx = float(g.get("cx", 0.0))
+            cy = float(g.get("cy", 0.0))
+            r = float(g.get("r", 0.0))
+            xs += [cx - r, cx + r]
+            ys += [cy - r, cy + r]
+        elif e.type in ("LWPOLYLINE", "POLYLINE"):
+            for v in g.get("vertices") or []:
+                if len(v) >= 2:
+                    xs.append(float(v[0]))
+                    ys.append(float(v[1]))
+
+    if not xs or not ys:
+        raise HTTPException(
+            status_code=500,
+            detail="外径から座標を抽出できませんでした",
+        )
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    w = max_x - min_x
+    h = max_y - min_y
+
+    # オフセット: bbox の短辺 10% (最低 10mm) を外側に確保。
+    off = max(min(w, h) * 0.1, 10.0)
+
+    dim_top = {
+        "id": f"auto_w_{uuid.uuid4().hex[:8]}",
+        "type": "linear",
+        "p1": [min_x, max_y + off],
+        "p2": [max_x, max_y + off],
+        "text_override": None,
+        "style": "iso",
+    }
+    dim_right = {
+        "id": f"auto_h_{uuid.uuid4().hex[:8]}",
+        "type": "linear",
+        "p1": [max_x + off, min_y],
+        "p2": [max_x + off, max_y],
+        "text_override": None,
+        "style": "iso",
+    }
+
+    existing = (store.read_phase4(sid, fid, "dimensions") or {}).get("dimensions") or []
+    if not isinstance(existing, list):
+        existing = []
+    merged = list(existing) + [dim_top, dim_right]
+    store.write_phase4(sid, fid, "dimensions", {"dimensions": merged})
+
+    return {
+        "added": 2,
+        "dimensions": merged,
+        "bbox": {
+            "min_x": min_x,
+            "min_y": min_y,
+            "max_x": max_x,
+            "max_y": max_y,
+        },
+        "width": w,
+        "height": h,
+    }
+
+
 @router.post("/edit-vertex", response_model=EditedVertexListResponse)
 async def post_edit_vertex(
     sid: str, fid: str, body: EditVertexRequest

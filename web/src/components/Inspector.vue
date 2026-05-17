@@ -39,6 +39,7 @@ const {
   setRectSelectMode,
   setRectInvert,
   setProtectOuterFromRect,
+  selectNonGeometricEntities,
   executeDelete,
   isDeleting,
   // Phase 2
@@ -104,6 +105,7 @@ const {
   setDimPrecision,
   setDimType,
   removeDimension,
+  addAutoOuterDimensions,
   setHoleDiameter,
   setHoleContinuous,
   setHolePatternOpen,
@@ -993,6 +995,17 @@ watch(
               の要素を選択リストに追加
             </p>
           </div>
+          <div v-if="currentFile" class="section-block">
+            <h6 class="lbl">一括選択</h6>
+            <button class="action-btn cy" @click="selectNonGeometricEntities">
+              <svg><use href="#i-delete" /></svg>
+              図形以外をすべて選択
+            </button>
+            <p class="lead">
+              LINE / CIRCLE / ARC / LWPOLYLINE 等の「図形」を残し、TEXT・寸法・
+              注記・図枠などを一括選択 (外形検出済み + 手動選択は保護)
+            </p>
+          </div>
           <div
             v-if="lastFrameCleanup"
             class="warn-strip"
@@ -1330,6 +1343,22 @@ watch(
             <div><div class="k">矢印サイズ</div><div class="ksub">ARROW-SIZE</div></div>
             <span class="v">{{ dimArrowSize.toFixed(1) }} mm</span>
           </div>
+        </div>
+
+        <div class="section-block">
+          <h6 class="lbl">自動寸法</h6>
+          <button
+            class="action-btn cy"
+            :disabled="!currentFile"
+            @click="addAutoOuterDimensions"
+          >
+            <svg><use href="#i-dim" /></svg>
+            外形寸法を自動付与 (横×縦)
+          </button>
+          <p class="lead">
+            確定済みの外径から bbox を計算し、上方向に横寸法・右方向に縦寸法を
+            自動配置します (外径未確定の場合はエラー)。
+          </p>
         </div>
 
         <div v-if="dimensions.length === 0" class="placeholder-card">

@@ -35,6 +35,7 @@ import type {
   EdgeInfo,
   EditedVertex,
   Entity,
+  EntityType,
   FileData,
   HolePatternRequest,
   Job,
@@ -656,6 +657,48 @@ export function useSession() {
     _selectedForDelete.value = new Set();
   }
 
+  /** Bulk-add every non-geometric entity (TEXT / MTEXT / DIMENSION / LEADER /
+   *  INSERT / HATCH / POINT / SOLID — i.e. anything that is NOT
+   *  LINE / CIRCLE / ARC / LWPOLYLINE / POLYLINE / ELLIPSE / SPLINE) to the
+   *  delete selection. Skips entities that are part of the confirmed outer
+   *  loop, the in-progress manual chain, or already classified as ``outer``
+   *  so the part outline is always preserved.
+   *
+   *  This is the "leave the shape, delete the annotations" shortcut for the
+   *  delete tool — used to wipe stray TEXT / DIMENSION / 図枠 / leader
+   *  arrows that the per-category buckets don't surface. */
+  function selectNonGeometricEntities(): void {
+    const fid = _currentFileId.value;
+    if (!fid) return;
+    const file = _files.value.get(fid);
+    if (!file) return;
+
+    const GEOMETRIC_TYPES = new Set<EntityType>([
+      'LINE',
+      'CIRCLE',
+      'ARC',
+      'LWPOLYLINE',
+      'POLYLINE',
+      'ELLIPSE',
+      'SPLINE',
+    ]);
+
+    const protectedIds = new Set<string>();
+    const outerLoop = _outerByFile.value.get(fid)?.outer_loop ?? [];
+    outerLoop.forEach((id) => protectedIds.add(id));
+    const manual = _manualByFile.value.get(fid) ?? [];
+    manual.forEach((id) => protectedIds.add(id));
+
+    const next = new Set(_selectedForDelete.value);
+    for (const e of file.entities) {
+      if (protectedIds.has(e.id)) continue;
+      if (e.category === 'outer') continue;
+      if (GEOMETRIC_TYPES.has(e.type)) continue;
+      next.add(e.id);
+    }
+    _selectedForDelete.value = next;
+  }
+
   /** Toggle the rectangle-select sub-mode (delete tool only). Turning it off
    *  also clears the invert flag — operator expectation is "off = fresh
    *  default" so the next time they flip it on they always start in the
@@ -1219,6 +1262,22 @@ export function useSession() {
       setMapEntry(_dimensionsByFile, fid, list.filter((d) => d.id !== id));
     } catch (err) {
       setError(err instanceof Error ? err.message : '寸法の削除に失敗しました');
+    }
+  }
+
+  /** Backend derives a top-width / right-height linear dim from the confirmed
+   *  outer bbox and appends both to the persisted dimension list. Surfaces
+   *  the backend's 409 error message (e.g. "外径が確定していません") via
+   *  ``setError`` when the outer is not yet confirmed. */
+  async function addAutoOuterDimensions(): Promise<void> {
+    const sid = _currentSession.value?.session_id;
+    const fid = _currentFileId.value;
+    if (!sid || !fid) return;
+    try {
+      const r = await api.addAutoOuterDimensions(sid, fid);
+      setMapEntry(_dimensionsByFile, fid, r.dimensions);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '寸法自動付与に失敗しました');
     }
   }
 
@@ -1855,6 +1914,7 @@ export function useSession() {
     setRectInvert,
     setProtectOuterFromRect,
     selectByRect,
+    selectNonGeometricEntities,
     executeDelete,
     exportDxf,
     exportDxfWithOffset,
@@ -1930,6 +1990,7 @@ export function useSession() {
     // Phase 4 actions
     loadAnnotations,
     addDimension,
+    addAutoOuterDimensions,
     removeDimension,
     setDimType,
     setDimPrecision,

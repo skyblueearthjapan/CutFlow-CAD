@@ -16,6 +16,7 @@
 import type {
   AddedHole,
   ApplyTemplateResponse,
+  BoundingBox,
   Bridge,
   ChamferGeometry,
   ChamferSpec,
@@ -57,6 +58,7 @@ import {
   mockExportPdf,
   mockListDimensions,
   mockRemoveDimension,
+  mockAddAutoOuterDimensions,
   mockEditVertex,
   mockSnap,
   mockListHoles,
@@ -529,6 +531,33 @@ export async function removeDimension(
     const body = await res.text().catch(() => '');
     throw new ApiError(res.status, body, buildErrorMessage(res.status, body, res.statusText));
   }
+}
+
+/** POST .../dimensions/auto-outer — derive top width / right height linear
+ *  dims from the confirmed outer-loop bbox and append them to the persisted
+ *  dimension list. 409 when the outer loop is not yet confirmed. */
+export async function addAutoOuterDimensions(
+  sid: string,
+  fid: string,
+): Promise<{
+  added: number;
+  dimensions: Dimension[];
+  bbox: BoundingBox;
+  width: number;
+  height: number;
+}> {
+  if (!(await probeBackend())) return mockAddAutoOuterDimensions(sid, fid);
+  const res = await fetch(
+    url(`/api/session/${sid}/file/${fid}/dimensions/auto-outer`),
+    { method: 'POST' },
+  );
+  return jsonOrThrow<{
+    added: number;
+    dimensions: Dimension[];
+    bbox: BoundingBox;
+    width: number;
+    height: number;
+  }>(res);
 }
 
 /** POST .../edit-vertex — record one or more vertex translations.

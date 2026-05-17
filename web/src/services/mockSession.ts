@@ -699,6 +699,53 @@ export async function mockRemoveDimension(
   bundle.dimensions.set(fid, list.filter((d) => d.id !== id));
 }
 
+/** POST /dimensions/auto-outer — derive top/right linear dims from the
+ *  file's bounding box and append them to the persisted list. The mock
+ *  always succeeds; the real backend gates on outer-loop confirmation. */
+export async function mockAddAutoOuterDimensions(
+  sid: string,
+  fid: string,
+): Promise<{
+  added: number;
+  dimensions: Dimension[];
+  bbox: { min_x: number; min_y: number; max_x: number; max_y: number };
+  width: number;
+  height: number;
+}> {
+  await new Promise((r) => setTimeout(r, 30));
+  const bundle = locateBundle(sid);
+  const file = locateFile(sid, fid);
+  const bb = file.bounding_box;
+  const w = bb.max_x - bb.min_x;
+  const h = bb.max_y - bb.min_y;
+  const off = Math.max(Math.min(w, h) * 0.1, 10.0);
+  const rid = () => Math.random().toString(16).slice(2, 10);
+  const dimTop: Dimension = {
+    id: `auto_w_${rid()}`,
+    type: 'linear',
+    p1: [bb.min_x, bb.max_y + off],
+    p2: [bb.max_x, bb.max_y + off],
+    style: 'iso',
+  };
+  const dimRight: Dimension = {
+    id: `auto_h_${rid()}`,
+    type: 'linear',
+    p1: [bb.max_x + off, bb.min_y],
+    p2: [bb.max_x + off, bb.max_y],
+    style: 'iso',
+  };
+  const list = bundle.dimensions.get(fid) ?? [];
+  const next = [...list, dimTop, dimRight];
+  bundle.dimensions.set(fid, next);
+  return {
+    added: 2,
+    dimensions: next,
+    bbox: { min_x: bb.min_x, min_y: bb.min_y, max_x: bb.max_x, max_y: bb.max_y },
+    width: w,
+    height: h,
+  };
+}
+
 /** POST /edit-vertex — record a vertex translation. */
 export async function mockEditVertex(
   sid: string,
