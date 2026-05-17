@@ -92,9 +92,16 @@ onMounted(() => {
     cursorX.value = (412 + Math.sin(t) * 0.4).toFixed(1);
     cursorY.value = (218.5 + Math.cos(t * 1.3) * 0.3).toFixed(1);
   }, 80);
+  // Pan tracking lives on `document` so a drag continues even when the
+  // cursor leaves the canvas — releasing outside the viewport still ends
+  // the pan cleanly. Listeners are removed in `onUnmounted` below.
+  document.addEventListener('mousemove', onPanMove);
+  document.addEventListener('mouseup', onPanEnd);
 });
 onUnmounted(() => {
   if (timer !== undefined) window.clearInterval(timer);
+  document.removeEventListener('mousemove', onPanMove);
+  document.removeEventListener('mouseup', onPanEnd);
 });
 
 /** Bounding box that *ignores* annotation/frame entities so the viewBox
@@ -129,8 +136,20 @@ const partBoundingBox = computed(() => {
   return { min_x: mnx, min_y: mny, max_x: mxx, max_y: mxy };
 });
 
-/** viewBox + Y-flip transform derived from the part bbox (zoomed to part). */
+/** User-driven zoom/pan override. When non-null, ``viewBox`` ignores the
+ *  bounding-box fit and uses this 4-tuple instead. Reset to ``null`` on file
+ *  switch / nest preview toggle / Fit button so the canvas re-frames the
+ *  drawing whenever the operator changes context. */
+const customViewBox = ref<[number, number, number, number] | null>(null);
+
+/** viewBox + Y-flip transform derived from the part bbox (zoomed to part).
+ *  When ``customViewBox`` is set (mouse-wheel zoom or middle/right-button pan)
+ *  it takes precedence so the operator's view stays put across re-renders. */
 const viewBox = computed(() => {
+  if (customViewBox.value) {
+    const [x, y, w, h] = customViewBox.value;
+    return `${x} ${y} ${w} ${h}`;
+  }
   const f = currentFile.value;
   if (!f) return '0 0 1200 800';
   const bb = partBoundingBox.value ?? f.bounding_box;
@@ -141,6 +160,104 @@ const viewBox = computed(() => {
   const my = h * 0.08;
   return `${bb.min_x - mx} ${bb.min_y - my} ${w + 2 * mx} ${h + 2 * my}`;
 });
+
+/** Current viewBox as a mutable numeric tuple — used by zoom/pan handlers
+ *  to compute the next custom viewBox without round-tripping through the
+ *  computed string. Always returns a fresh copy so callers can mutate. */
+function currentViewBoxNums(): [number, number, number, number] {
+  if (customViewBox.value) {
+    return [
+      customViewBox.value[0],
+      customViewBox.value[1],
+      customViewBox.value[2],
+      customViewBox.value[3],
+    ];
+  }
+  const [x, y, w, h] = viewBox.value.split(' ').map(Number);
+  return [x, y, w, h];
+}
+
+/** DOM ref for the canvas section — used to translate raw client coordinates
+ *  into normalized (0-1) positions within the canvas, which the wheel/pan
+ *  handlers then map into DXF space via the current viewBox. */
+const canvasAreaRef = ref<HTMLElement | null>(null);
+
+/** Reset zoom/pan when the operator switches files or toggles the nest
+ *  preview — both transitions imply "show me the new content fitted". */
+watch(currentFileId, () => {
+  customViewBox.value = null;
+});
+
+/* -------------------- Canvas-local zoom + pan (Phase 7) ----------------- */
+
+/** Mouse-wheel zoom centred on the cursor. Limited to the live file or nest
+ *  preview so the empty-state placeholder doesn't react to wheel events. We
+ *  preventDefault so the browser's page-scroll doesn't fire inside the
+ *  canvas area (the rest of the app uses ctrl+wheel for page zoom — this
+ *  handler intercepts the canvas wheel before it can bubble). */
+function onWheelZoom(e: WheelEvent) {
+  if (!hasFile.value && !showNestPreview.value) return;
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const [vx, vy, vw, vh] = currentViewBoxNums();
+  const el = canvasAreaRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  // Normalized cursor position within the canvas (0..1).
+  const rx = (e.clientX - rect.left) / rect.width;
+  const ry = (e.clientY - rect.top) / rect.height;
+  const newW = vw / factor;
+  const newH = vh / factor;
+  // Keep the DXF point under the cursor fixed: vx + rx*vw === newVx + rx*newW
+  const newVx = vx + (vw - newW) * rx;
+  const newVy = vy + (vh - newH) * ry;
+  customViewBox.value = [newVx, newVy, newW, newH];
+}
+
+/** Middle/right-button pan state. The drag is anchored against the viewBox
+ *  snapshot taken at mousedown so the pan delta stays linear regardless of
+ *  intermediate zoom. */
+const isPanning = ref(false);
+let panStartScreen: { x: number; y: number } | null = null;
+let panStartViewBox: [number, number, number, number] | null = null;
+
+function onPanStart(e: MouseEvent) {
+  // Only middle (1) or right (2) buttons trigger pan — left button is
+  // reserved for the existing click handlers (delete, outer manual,
+  // chamfer, edit, etc.).
+  if (e.button !== 1 && e.button !== 2) return;
+  if (!hasFile.value && !showNestPreview.value) return;
+  e.preventDefault();
+  isPanning.value = true;
+  panStartScreen = { x: e.clientX, y: e.clientY };
+  panStartViewBox = currentViewBoxNums();
+}
+
+function onPanMove(e: MouseEvent) {
+  if (!isPanning.value || !panStartScreen || !panStartViewBox) return;
+  const el = canvasAreaRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  const [vx, vy, vw, vh] = panStartViewBox;
+  // Screen-pixel delta scaled into DXF units. Negate because dragging the
+  // mouse right should move the viewBox LEFT (content follows the cursor).
+  const dx = -((e.clientX - panStartScreen.x) / rect.width) * vw;
+  const dy = -((e.clientY - panStartScreen.y) / rect.height) * vh;
+  customViewBox.value = [vx + dx, vy + dy, vw, vh];
+}
+
+function onPanEnd() {
+  if (!isPanning.value) return;
+  isPanning.value = false;
+  panStartScreen = null;
+  panStartViewBox = null;
+}
+
+/** Suppress the browser context menu inside the canvas so right-button
+ *  drag-pan stays usable. The rest of the app keeps the default menu. */
+function onContextMenu(e: MouseEvent) {
+  e.preventDefault();
+}
 
 /** Y-flip: translate by (max_y + min_y) so the flipped result is still in
  *  the bounding box, then scale(1,-1) to make Y point down on the screen. */
@@ -796,10 +913,10 @@ const vertexHandles = computed<VertexHandle[]>(() => {
   return out;
 });
 
-/** "Fit" button — for now just resets to the bounding-box viewBox (no zoom
- *  state to clear yet). Kept as a stub so the button is wired and visible. */
+/** "Fit" button — clear any user-driven zoom/pan so the canvas re-frames the
+ *  active drawing (or the nest preview) to its bounding box. */
 function onFit() {
-  // No-op until pan/zoom lands in Phase 2; viewBox already follows the file.
+  customViewBox.value = null;
 }
 
 /* -------------------- Phase 5 — nesting result preview ----------------- */
@@ -809,6 +926,12 @@ function onFit() {
 const showNestPreview = computed(
   () => activeTool.value === 'nest' && !!nestingResult.value,
 );
+
+/** Reset zoom/pan when entering/leaving the nest preview — the multi-sheet
+ *  layout uses a different coordinate space than the per-file viewBox. */
+watch(showNestPreview, () => {
+  customViewBox.value = null;
+});
 
 /** Layout sheets side-by-side with a fixed 80 mm gap, derive a viewBox that
  *  covers everything plus an 8% margin. The result drives both the
@@ -886,7 +1009,14 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
 </script>
 
 <template>
-  <section class="canvas-area">
+  <section
+    class="canvas-area"
+    ref="canvasAreaRef"
+    :class="{ 'is-panning': isPanning }"
+    @wheel="onWheelZoom"
+    @mousedown="onPanStart"
+    @contextmenu="onContextMenu"
+  >
     <!-- floating toolbar (kept 1:1 with v3) -->
     <div class="c-tools">
       <button title="パン (Space)"><svg><use href="#i-pan" /></svg></button>
@@ -1240,127 +1370,18 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
         </g>
       </template>
 
-      <!-- ========== EMPTY-STATE: v3 demo SVG (unchanged) ========== -->
-      <template v-else-if="!showNestPreview">
-        <!-- Origin -->
-        <g transform="translate(220, 660)">
-          <line x1="0" y1="0" x2="18" y2="0" stroke="var(--cy)" stroke-width="1" />
-          <line x1="0" y1="0" x2="0" y2="-18" stroke="var(--cy)" stroke-width="1" />
-          <circle cx="0" cy="0" r="2.5" fill="var(--cy)" />
-          <text x="-6" y="14" font-family="IBM Plex Mono" font-size="9" fill="var(--cy)" text-anchor="end">0,0</text>
-        </g>
-
-        <!-- Offset preview -->
-        <path
-          class="offset-fill"
-          d="M 196 167 L 856 167 Q 893 167 893 204 L 893 596 Q 893 633 856 633 L 196 633 Q 160 633 160 596 L 160 204 Q 160 167 196 167 Z"
-          fill="rgba(77,207,224,0.06)"
-        />
-        <path
-          class="ent offset"
-          d="M 196 167 L 856 167 Q 893 167 893 204 L 893 596 Q 893 633 856 633 L 196 633 Q 160 633 160 596 L 160 204 Q 160 167 196 167 Z"
-        />
-
-        <!-- Outer -->
-        <path
-          class="ent outer"
-          d="M 220 200 L 840 200 Q 860 200 860 220 L 860 580 Q 860 600 840 600 L 220 600 Q 200 600 200 580 L 200 220 Q 200 200 220 200 Z"
-        />
-        <path
-          class="outer-anim"
-          d="M 220 200 L 840 200 Q 860 200 860 220 L 860 580 Q 860 600 840 600 L 220 600 Q 200 600 200 580 L 200 220 Q 200 200 220 200 Z"
-        />
-
-        <!-- Chamfer -->
-        <path class="ent chamfer" d="M 845 200 L 860 215" />
-        <g class="ent chamfer-glyph">
-          <line x1="855" y1="195" x2="865" y2="195" />
-          <text x="870" y="208" font-family="IBM Plex Mono" font-size="10" fill="var(--chamfer)" stroke="none">C2</text>
-        </g>
-
-        <!-- Holes -->
-        <circle class="ent hole" cx="290" cy="290" r="14" />
-        <circle class="ent hole" cx="770" cy="290" r="14" />
-        <circle class="ent hole" cx="290" cy="510" r="14" />
-        <circle class="ent hole" cx="770" cy="510" r="14" />
-        <circle class="ent hole" cx="530" cy="400" r="40" />
-        <g stroke="var(--cy)" stroke-width="0.6" opacity="0.4">
-          <line x1="285" y1="290" x2="295" y2="290" /><line x1="290" y1="285" x2="290" y2="295" />
-          <line x1="765" y1="290" x2="775" y2="290" /><line x1="770" y1="285" x2="770" y2="295" />
-          <line x1="285" y1="510" x2="295" y2="510" /><line x1="290" y1="505" x2="290" y2="515" />
-          <line x1="765" y1="510" x2="775" y2="510" /><line x1="770" y1="505" x2="770" y2="515" />
-          <line x1="520" y1="400" x2="540" y2="400" /><line x1="530" y1="390" x2="530" y2="410" />
-        </g>
-        <text class="lbl" x="304" y="280" fill="rgba(77,207,224,0.5)">φ9</text>
-        <text class="lbl" x="784" y="280" fill="rgba(77,207,224,0.5)">φ9</text>
-        <text class="lbl" x="304" y="500" fill="rgba(77,207,224,0.5)">φ9</text>
-        <text class="lbl" x="784" y="500" fill="rgba(77,207,224,0.5)">φ9</text>
-        <text class="lbl" x="558" y="378" fill="rgba(77,207,224,0.5)">φ80</text>
-
-        <!-- Taps -->
-        <g><circle class="ent tap" cx="430" cy="250" r="6" /><text class="lbl-am" x="440" y="246">M8</text></g>
-        <g><circle class="ent tap" cx="630" cy="250" r="6" /><text class="lbl-am" x="640" y="246">M8</text></g>
-        <g><circle class="ent tap" cx="430" cy="550" r="6" /><text class="lbl-am" x="440" y="546">M8</text></g>
-        <g><circle class="ent tap" cx="630" cy="550" r="6" /><text class="lbl-am" x="640" y="546">M8</text></g>
-
-        <!-- Dimensions -->
-        <g>
-          <line class="ent dim" x1="200" y1="660" x2="860" y2="660" marker-end="url(#arr-am)" marker-start="url(#arr-am)" />
-          <line class="ent dim" x1="200" y1="650" x2="200" y2="670" />
-          <line class="ent dim" x1="860" y1="650" x2="860" y2="670" />
-          <text class="lbl-am" x="530" y="678" text-anchor="middle">440</text>
-        </g>
-        <g>
-          <line class="ent dim" x1="130" y1="200" x2="130" y2="600" marker-end="url(#arr-am)" marker-start="url(#arr-am)" />
-          <line class="ent dim" x1="120" y1="200" x2="140" y2="200" />
-          <line class="ent dim" x1="120" y1="600" x2="140" y2="600" />
-          <text class="lbl-am" x="118" y="404" text-anchor="end">280</text>
-        </g>
-        <g>
-          <line class="ent dim" x1="530" y1="400" x2="690" y2="180" />
-          <line class="ent dim" x1="690" y1="180" x2="730" y2="180" />
-          <text class="lbl-am" x="734" y="178">φ80</text>
-        </g>
-        <g>
-          <line class="ent dim" x1="290" y1="120" x2="770" y2="120" marker-end="url(#arr-am)" marker-start="url(#arr-am)" />
-          <line class="ent dim" x1="290" y1="110" x2="290" y2="130" />
-          <line class="ent dim" x1="770" y1="110" x2="770" y2="130" />
-          <text class="lbl-am" x="530" y="138" text-anchor="middle">480</text>
-        </g>
-
-        <!-- Balloons -->
-        <g>
-          <line class="ent dim" x1="290" y1="290" x2="170" y2="100" />
-          <circle class="balloon-circle" cx="160" cy="92" r="14" />
-          <text class="lbl-am" x="160" y="96" text-anchor="middle" font-size="10" font-weight="600">1</text>
-        </g>
-        <g>
-          <line class="ent dim" x1="530" y1="400" x2="950" y2="320" />
-          <circle class="balloon-circle" cx="966" cy="316" r="14" />
-          <text class="lbl-am" x="966" y="320" text-anchor="middle" font-size="10" font-weight="600">2</text>
-        </g>
-
-        <!-- Title frame -->
-        <g>
-          <rect class="ent frame" x="80" y="70" width="1040" height="660" rx="2" />
-          <rect class="ent frame" x="900" y="700" width="220" height="30" />
-          <line class="ent frame" x1="900" y1="715" x2="1120" y2="715" />
-          <line class="ent frame" x1="1010" y1="700" x2="1010" y2="730" />
-          <text class="lbl-am" x="908" y="711" font-size="9">25057-P1-03 センタープレート</text>
-          <text class="lbl-am" x="908" y="726" font-size="9">SS400 t9</text>
-          <text class="lbl-am" x="1018" y="711" font-size="9">SCALE 1:1</text>
-          <text class="lbl-am" x="1018" y="726" font-size="9">REV. 03</text>
-        </g>
-
-        <!-- Cut sequence nodes -->
-        <g class="cut-node"><circle cx="220" cy="200" r="9" /><text x="220" y="203" text-anchor="middle">1</text></g>
-        <g class="cut-node"><circle cx="290" cy="290" r="8" /><text x="290" y="293" text-anchor="middle">2</text></g>
-        <g class="cut-node"><circle cx="770" cy="290" r="8" /><text x="770" y="293" text-anchor="middle">3</text></g>
-        <g class="cut-node"><circle cx="530" cy="400" r="8" /><text x="530" y="403" text-anchor="middle">4</text></g>
-        <g class="cut-node"><circle cx="290" cy="510" r="8" /><text x="290" y="513" text-anchor="middle">5</text></g>
-        <g class="cut-node"><circle cx="770" cy="510" r="8" /><text x="770" y="513" text-anchor="middle">6</text></g>
-      </template>
     </svg>
+
+    <!-- Empty-state placeholder — absolute overlay shown when there's no
+         active file and the nest preview isn't taking over the canvas. Sits
+         above the SVG (z-index:2) so it stays legible over the technical
+         grid, but with pointer-events:none so the canvas surface still
+         receives wheel/pan events the moment a file is loaded behind it. -->
+    <div v-if="!hasFile && !showNestPreview" class="empty-canvas-msg">
+      <svg><use href="#i-output" /></svg>
+      <div class="empty-title">DXF をアップロードしてください</div>
+      <div class="empty-hint">右上の「ファイル」または「フォルダ」ボタンから取り込めます</div>
+    </div>
 
     <!-- Note text-input modal (Phase 4 — note mode click). Positioned
          absolutely so it overlays the canvas without disturbing the v3 grid. -->
@@ -1713,5 +1734,43 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
   font-weight: 600;
   stroke: none;
   pointer-events: none;
+}
+
+/* Empty-state placeholder — centred overlay shown before any DXF is loaded.
+   Sits above the canvas SVG (z-index:2) but is non-interactive so the
+   technical grid + upload zone keep working underneath. */
+.empty-canvas-msg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--t-3);
+  pointer-events: none;
+  z-index: 2;
+}
+.empty-canvas-msg svg {
+  width: 40px;
+  height: 40px;
+  opacity: 0.4;
+}
+.empty-canvas-msg .empty-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--t-2);
+}
+.empty-canvas-msg .empty-hint {
+  font-size: 12px;
+  color: var(--t-4);
+  font-family: var(--f-mono);
+}
+
+/* Phase 7 — canvas pan cursor. While middle/right-button drag is active we
+   swap to the grabbing cursor so the operator gets the standard CAD pan
+   feedback. The default cursor is set per-tool by other modules. */
+.canvas-area.is-panning {
+  cursor: grabbing;
 }
 </style>
