@@ -546,6 +546,30 @@ export function useSession() {
     if (!_files.value.has(fid)) await loadFile(fid);
   }
 
+  /** Switch to the file immediately before the active tab. No-op when no
+   *  session is loaded, no file is selected, or the active file is already
+   *  the first one (no wrap-around — keeps arrow-key navigation predictable
+   *  so the operator can hold ← without surprise jumps to the end). */
+  async function selectPreviousFile(): Promise<void> {
+    const sess = _currentSession.value;
+    const cur = _currentFileId.value;
+    if (!sess || !cur) return;
+    const idx = sess.files.findIndex((f) => f.file_id === cur);
+    if (idx <= 0) return;
+    await selectFile(sess.files[idx - 1].file_id);
+  }
+
+  /** Switch to the file immediately after the active tab. No-op at the end
+   *  of the list (symmetric with selectPreviousFile — no wrap-around). */
+  async function selectNextFile(): Promise<void> {
+    const sess = _currentSession.value;
+    const cur = _currentFileId.value;
+    if (!sess || !cur) return;
+    const idx = sess.files.findIndex((f) => f.file_id === cur);
+    if (idx < 0 || idx >= sess.files.length - 1) return;
+    await selectFile(sess.files[idx + 1].file_id);
+  }
+
   /** Force-fetch (or re-fetch) the parsed entity payload for a file.
    *
    *  Also rehydrates the persisted outer / offset payloads in parallel so
@@ -1820,6 +1844,8 @@ export function useSession() {
     // actions
     uploadFiles,
     selectFile,
+    selectPreviousFile,
+    selectNextFile,
     loadFile,
     selectEntity,
     toggleCategory,

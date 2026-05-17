@@ -76,6 +76,8 @@ const {
   isLoadingRenderedSvg,
   loadRenderedSvg,
   toggleRenderMode,
+  // Drag&drop upload (キャンバス全面)
+  uploadFiles,
 } = useSession();
 
 const cursorX = ref('412.0');
@@ -257,6 +259,93 @@ function onPanEnd() {
  *  drag-pan stays usable. The rest of the app keeps the default menu. */
 function onContextMenu(e: MouseEvent) {
   e.preventDefault();
+}
+
+/* -------------------- Drag&drop upload (キャンバス全面) ------------------
+ * 空状態 / file 読込済み 問わず、CanvasArea 全体で DXF ファイル・複数ファイル・
+ * フォルダ単位のドロップを受け付ける。フォルダはサブフォルダ含め再帰収集し、
+ * 組立図 (`*組立図*`) の除外は session.uploadFiles 側で行う。
+ * 同じくらいの粒度の overlay 用フラグ。子要素間 dragleave で消えないよう、
+ * onDragLeave は座標で canvas-area 外側に出たかを判定する。 */
+const isDragOverlay = ref(false);
+
+function onDragOver(e: DragEvent) {
+  e.preventDefault();
+  if (!e.dataTransfer) return;
+  e.dataTransfer.dropEffect = 'copy';
+  isDragOverlay.value = true;
+}
+
+function onDragLeave(e: DragEvent) {
+  const el = canvasAreaRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  const x = e.clientX;
+  const y = e.clientY;
+  if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+    isDragOverlay.value = false;
+  }
+}
+
+async function onDrop(e: DragEvent) {
+  e.preventDefault();
+  isDragOverlay.value = false;
+  if (!e.dataTransfer) return;
+  const collected: File[] = [];
+  // webkitGetAsEntry でファイル/フォルダ両対応。items が無いブラウザは
+  // dataTransfer.files で fallback。
+  const items = Array.from(e.dataTransfer.items ?? []);
+  for (const item of items) {
+    if (item.kind !== 'file') continue;
+    const entry = (item as DataTransferItem & {
+      webkitGetAsEntry?: () => FileSystemEntry | null;
+    }).webkitGetAsEntry?.();
+    if (entry) {
+      await collectDxfFiles(entry, collected);
+    } else {
+      const f = item.getAsFile();
+      if (f && /\.dxf$/i.test(f.name)) collected.push(f);
+    }
+  }
+  if (collected.length === 0 && e.dataTransfer.files) {
+    for (const f of Array.from(e.dataTransfer.files)) {
+      if (/\.dxf$/i.test(f.name)) collected.push(f);
+    }
+  }
+  if (collected.length === 0) return;
+  await uploadFiles(collected);
+}
+
+/** DirectoryEntry を辿って .dxf を再帰収集。FileSystem Entry API はブラウザ
+ *  仕様揺れが大きいので any 型でラップしている。 */
+async function collectDxfFiles(entry: FileSystemEntry, out: File[]): Promise<void> {
+  const e = entry as unknown as {
+    isFile: boolean;
+    isDirectory: boolean;
+    file?: (cb: (f: File) => void, err: (e: unknown) => void) => void;
+    createReader?: () => {
+      readEntries: (cb: (es: FileSystemEntry[]) => void, err: (e: unknown) => void) => void;
+    };
+  };
+  if (e.isFile && e.file) {
+    const file: File = await new Promise((res, rej) => {
+      e.file!(res, rej);
+    });
+    if (/\.dxf$/i.test(file.name)) out.push(file);
+    return;
+  }
+  if (e.isDirectory && e.createReader) {
+    const reader = e.createReader();
+    let entries: FileSystemEntry[];
+    do {
+      entries = await new Promise<FileSystemEntry[]>((res, rej) => {
+        reader.readEntries(res, rej);
+      });
+      for (const child of entries) {
+        await collectDxfFiles(child, out);
+      }
+    } while (entries.length > 0);
+  }
 }
 
 /** Y-flip: translate by (max_y + min_y) so the flipped result is still in
@@ -1012,10 +1101,13 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
   <section
     class="canvas-area"
     ref="canvasAreaRef"
-    :class="{ 'is-panning': isPanning }"
+    :class="{ 'is-panning': isPanning, 'is-drag-over': isDragOverlay }"
     @wheel="onWheelZoom"
     @mousedown="onPanStart"
     @contextmenu="onContextMenu"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
   >
     <!-- floating toolbar (kept 1:1 with v3) -->
     <div class="c-tools">
@@ -1463,6 +1555,12 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
         </div>
       </template>
     </div>
+
+    <!-- Drag&drop overlay (キャンバス全面で DXF / フォルダ受付) -->
+    <div v-if="isDragOverlay" class="drop-overlay" aria-hidden="true">
+      <svg><use href="#i-output" /></svg>
+      <span>DXFをここにドロップして取り込み</span>
+    </div>
   </section>
 </template>
 
@@ -1772,5 +1870,31 @@ function nestPlacementLabelSize(layout: SheetLayout): number {
    feedback. The default cursor is set per-tool by other modules. */
 .canvas-area.is-panning {
   cursor: grabbing;
+}
+
+/* Drag&drop overlay。canvas-area 全面 (空状態・読込済み問わず) で
+   DXF / フォルダのドロップを受け付ける。既存 .canvas-area::after が
+   グリッド表示で使われているため、専用 div で実装している。
+   pointer-events: none を付けて drop イベントは親 (section) に届かせる。 */
+.drop-overlay {
+  position: absolute;
+  inset: 16px;
+  border: 2px dashed var(--cy);
+  border-radius: 8px;
+  background: rgba(77, 207, 224, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--cy);
+  font-size: 18px;
+  font-weight: 500;
+  z-index: 50;
+  pointer-events: none;
+}
+.drop-overlay svg {
+  width: 28px;
+  height: 28px;
+  fill: currentColor;
 }
 </style>

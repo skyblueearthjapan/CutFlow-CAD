@@ -22,12 +22,27 @@ const {
   setNotePendingAnchor,
   notePendingAnchor,
   setEditOrtho,
+  selectPreviousFile,
+  selectNextFile,
 } = useSession();
 
 function onKey(e: KeyboardEvent) {
-  // INPUT/TEXTAREA フォーカス中は無視 (数値入力を妨げない)
-  const tag = (e.target as HTMLElement | null)?.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  // INPUT/TEXTAREA / contentEditable フォーカス中は無視 (数値入力を妨げない)
+  const target = e.target as HTMLElement | null;
+  const tag = target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+  // 矢印キーは修飾キーなしの単独押下のみ前後DXF切替に使う。
+  // (Shift は edit ortho など別用途で使うため矢印では弾かない)
+  if (e.key === 'ArrowLeft' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    void selectPreviousFile();
+    return;
+  }
+  if (e.key === 'ArrowRight' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    void selectNextFile();
+    return;
+  }
   const mode = keyToMode[e.key];
   if (mode) {
     setTool(mode);
